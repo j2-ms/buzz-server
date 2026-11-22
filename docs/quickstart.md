@@ -30,6 +30,20 @@ the server to perform this step.
 
 ## Configure and start
 
+When using a dedicated unprivileged service account, you can create a stopped
+agent interactively with `buzz-server create assistant`. The guided prompts ask
+for a name, optional profile details, the operator public key, relay and a
+single-line system prompt. Empty optional answers use the displayed defaults;
+Ctrl+C, Ctrl+D or declining confirmation discards the choices. The command finds
+Goose in the managed or fixed system paths. It never asks for a private key or
+provider credentials. Run `buzz-server inference configure assistant` afterward
+for Goose's native provider setup, then follow the admission and start steps
+below. For automation, JSON output, or a custom Goose executable, use the
+configuration-file method below. The guided command runs under the current
+Linux account; it does not select or create a separate account.
+
+### Configuration-file method
+
 1. Run `install -d -m 700 "$HOME/.config/buzz-server"`. Set `umask 077`, then create `agent.json` and `prompt.txt` in that directory with mode `0600`. Put the system prompt in `prompt.txt`. Do not put keys in command arguments, shell history, or agent JSON.
 2. Save the following as `agent.json`. Replace the relay URL, owner **public** key (64 lowercase hex characters), and absolute paths. The owner is the Buzz identity allowed to prompt this agent.
 

@@ -13,7 +13,7 @@ from .errors import Error
 from .identity import generate
 from .runtime import configure_goose, prepare
 from .storage import Store, agent_id, atomic, private_dir, read_json, read_private
-from .supervisor import Systemd
+from .supervisor import PreexistingUnit, Systemd
 
 
 class Parser(argparse.ArgumentParser):
@@ -46,7 +46,7 @@ def parser():
         sub = commands.add_parser(op)
         sub.add_argument("id", type=agent_id)
         if op in ("create", "configure"):
-            sub.add_argument("--config", required=True, help="Private JSON configuration file; configure replaces the complete config")
+            sub.add_argument("--config", required=(op == "configure"), help="Private JSON configuration file; configure replaces the complete config")
         if op == "logs":
             sub.add_argument("--lines", type=int, default=30)
     sub = commands.add_parser("inference", help="Manage inference through upstream Goose")
@@ -125,8 +125,15 @@ def execute(args):
         return release.update(prefix)
     if args.operation == "inference" and (args.json or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))):
         raise Error("interactive_required", "Goose setup requires an interactive terminal on stdin/stdout/stderr and cannot run with --json.")
+    if args.operation == "create" and not args.config and (args.json or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))):
+        raise Error("interactive_required", "Guided creation requires a terminal on stdin/stdout/stderr; use --config for JSON or non-interactive creation.")
     store = Store(args.state_dir)
     supervisor = Systemd(store, args.unit_dir)
+    guided = None
+    if args.operation == "create" and not args.config:
+        # Do not hold the lifecycle lock while the operator is at a prompt.
+        supervisor.check()
+        guided = guided_create(args.id, store.directory(args.id), store.root)
     with store.lock():
         if args.operation == "logs":
             store.load(args.id)
@@ -171,18 +178,30 @@ def execute(args):
             directory = store.directory(args.id)
             if directory.exists() or directory.is_symlink():
                 raise Error("already_exists", "This ID already has managed or retained data. Choose another ID; delete retains private data and identity.")
-            c = config.load(args.config)
+            prompt = None
+            if guided is None:
+                c = config.load(args.config)
+            else:
+                c, prompt = guided
             key, identity = generate()
-            private_dir(directory)
             doc = {"version": 1, "id": args.id, "identity": identity, "config": c, "desired": "stopped", "revision": 1}
             try:
+                private_dir(directory)
                 atomic(directory / "identity.key", key.encode())
+                if prompt is not None:
+                    atomic(directory / "user-prompt.txt", prompt.encode("utf-8"))
                 prepare(store, doc, snapshot=False)
-            except Exception:
+                store.save(doc)
+            except BaseException:
+                if directory.exists():
+                    shutil.rmtree(directory)
+                raise
+            try:
+                supervisor.install(args.id, new=True)
+            except PreexistingUnit:
+                # This conflict is detected before the new unit is written.
                 shutil.rmtree(directory)
                 raise
-            store.save(doc)
-            supervisor.install(args.id, new=True)
             return view(store, supervisor, doc)
         doc = store.load(args.id)
         if args.operation in ("start", "restart", "inference"):
@@ -222,6 +241,40 @@ def execute(args):
             return {"id": args.id, "deleted": True, "worker_stopped": True, "data_retained": True,
                     "linux_account_deleted": False, "buzz_history_deleted": False}
         raise Error("usage", "Unknown operation. Run buzz-server --help.")
+
+
+def guided_create(ident, directory, root):
+    """Collect choices only; all validation and confirmation precede agent state."""
+    from .runtime import tool
+
+    def ask(label, default=None):
+        suffix = f" [{default}]" if default is not None else ""
+        try:
+            value = input(f"{label}{suffix}: ")
+        except EOFError:
+            raise Error("creation_cancelled", "Creation cancelled; no agent was created.") from None
+        return value if value else (default if default is not None else "")
+
+    print("Create an agent. Press Ctrl+C or Ctrl+D to discard. Enter only the operator's public Buzz key; never a private key.")
+    name = ask("Agent name", ident)
+    about = ask("Profile description (optional)", "")
+    avatar = ask("Avatar HTTPS URL (optional)", "")
+    owner = ask("Operator Buzz public key (64 lowercase hex characters)")
+    relay = ask("Relay URL (wss://)")
+    prompt = ask("System prompt (single line)", "You are a helpful assistant.")
+    if len(prompt.encode("utf-8")) > 65536:
+        raise Error("invalid_config", "System prompt must be UTF-8 text of at most 64 KiB.")
+    c = {"relay_url": relay, "owner": owner, "profile": {"name": name, "about": about, "avatar": avatar},
+         "prompt_file": str(directory / "user-prompt.txt"), "provider": {"kind": "goose-managed"},
+         "harness": {"kind": "goose", "command": tool("goose", root)}}
+    config.validate(c)
+    config.validate_relay_transport(relay)
+    if not config.text(prompt, 65536, True):
+        raise Error("invalid_config", "System prompt contains invalid characters.")
+    print("The agent will be created stopped under the current Linux account. Configure provider credentials later with inference configure.")
+    if ask("Create agent? Enter yes to confirm", "no").lower() != "yes":
+        raise Error("creation_cancelled", "Creation discarded; no agent was created.")
+    return c, prompt
 
 
 def require_stopped(supervisor, doc):
@@ -267,13 +320,9 @@ def render(operation, data):
         if data["missing_runtime_tools"]:
             lines.append("Missing runtime tools: " + ", ".join(data["missing_runtime_tools"]) + ".")
             lines.append("Install prerequisites yourself: https://github.com/block/buzz/releases/tag/desktop-v0.5.30 and https://github.com/aaif-goose/goose/releases/tag/v1.60.2; see docs/releases.md.")
-        goose = data["runtime_tool_paths"]["goose"]
-        if goose:
-            lines.append(f"Goose found at {goose}; use this exact path as harness.command in agent JSON passed with --config (also doctor --config).")
-        else:
-            lines.append("Install Goose, then set harness.command in agent JSON to its exact absolute executable path.")
-        lines.append("buzz-server update does not update privately installed runtime tools.")
-        lines.append("Presence is not a compatibility check. Next: run buzz-server doctor (or the prefix bin/buzz-server for a custom prefix), then follow docs/quickstart.md. If the command is not found, run ~/.local/bin/buzz-server doctor; see docs/releases.md for PATH guidance. No services started; install status does not prove relay/provider readiness.")
+        lines.append("Next: run buzz-server doctor, then follow docs/quickstart.md. No services were started.")
+        if Path(data["prefix"]) != Path.home().absolute() / ".local/buzz-server-cli":
+            lines.append("For a custom prefix, use its bin/buzz-server launcher; see docs/releases.md.")
         return "\n".join(lines)
     return json.dumps(data, indent=2)
 

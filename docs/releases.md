@@ -166,6 +166,7 @@ errors leave the previous CLI usable. Explicit updates
 report sanitized errors; automatic check failures stay quiet.
 An already verified local artifact can also run `install --prefix SAME_PREFIX`.
 An active installation cannot downgrade.
+`buzz-server update` updates the management CLI, not privately installed runtime tools.
 
 On a fresh first install, interactive update offers are enabled. Existing installs
 retain their stored on/off preference unchanged; `update --auto on/off` now controls

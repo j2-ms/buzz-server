@@ -16,7 +16,7 @@ from buzz_server.errors import Error
 from buzz_server.identity import generate, public
 from buzz_server.runtime import event, prepare, profile_accepted, worker
 from buzz_server.storage import Store, atomic, private_dir, read_private
-from buzz_server.supervisor import Systemd, quote
+from buzz_server.supervisor import PreexistingUnit, Systemd, quote
 
 
 class FakeSystemd:
@@ -96,6 +96,76 @@ class CliTests(unittest.TestCase):
 
     def create(self):
         return self.call("create", "agent", "--config", str(self.config_path))
+
+    def guided(self, answers):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+             patch("sys.stdin.isatty", return_value=True), \
+             patch.object(out, "isatty", return_value=True), patch.object(err, "isatty", return_value=True), \
+             patch("builtins.input", side_effect=answers), patch("buzz_server.runtime.tool", return_value="/usr/bin/true"):
+            code = cli.main(["--state-dir", str(self.root), "--unit-dir", str(self.units), "create", "agent"])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_guided_defaults_and_private_files(self):
+        old = os.umask(0)
+        try:
+            code, out, err = self.guided(["", "", "", "ab" * 32, "wss://relay.example", "", "yes"])
+        finally:
+            os.umask(old)
+        self.assertEqual(code, 0, err)
+        doc = Store(self.root).load("agent")
+        self.assertEqual(doc["config"]["profile"], {"name": "agent", "about": "", "avatar": ""})
+        prompt = Path(doc["config"]["prompt_file"])
+        self.assertEqual(read_private(prompt), b"You are a helpful assistant.")
+        self.assertEqual(prompt.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(prompt.parent.stat().st_mode & 0o777, 0o700)
+        self.assertNotIn("You are a helpful assistant.", out)
+
+    def test_guided_custom_choices_and_unit_conflict(self):
+        answers = ["Custom", "Description", "https://example.org/avatar", "ab" * 32,
+                   "wss://relay.example", "Synthetic custom instruction", "yes"]
+        with patch.object(FakeSystemd, "install", side_effect=PreexistingUnit("unit_conflict", "conflict")):
+            code, _, _ = self.guided(answers)
+        self.assertEqual(code, 1)
+        self.assertFalse((self.root / "agents/agent").exists())
+        code, out, err = self.guided(answers)
+        self.assertEqual(code, 0, err)
+        doc = Store(self.root).load("agent")
+        self.assertEqual(doc["config"]["profile"]["name"], "Custom")
+        self.assertEqual(read_private(doc["config"]["prompt_file"]), b"Synthetic custom instruction")
+        self.assertNotIn("Synthetic custom instruction", out)
+
+    def test_guided_invalid_and_discard_leave_no_agent(self):
+        for answers in (["", "", "", "invalid", "wss://relay.example", "", "yes"],
+                        ["", "", "", "ab" * 32, "wss://relay.example", "", "no"],
+                        ["", "", EOFError()], ["", "", KeyboardInterrupt()]):
+            code, _, _ = self.guided(answers)
+            self.assertEqual(code, 1)
+            self.assertFalse((self.root / "agents/agent").exists())
+
+    def test_guided_nonterminal_and_json_refused(self):
+        self.assertEqual(self.call("create", "agent", success=False)["code"], "interactive_required")
+        self.assertFalse(self.root.exists())
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["--state-dir", str(self.root), "create", "agent"]), 1)
+        self.assertIn("interactive_required", err.getvalue())
+        self.assertFalse(self.root.exists())
+
+    def test_guided_prepare_failure_removes_agent(self):
+        with patch("buzz_server.cli.prepare", side_effect=Error("synthetic", "failed")):
+            code, _, _ = self.guided(["", "", "", "ab" * 32, "wss://relay.example", "", "yes"])
+        self.assertEqual(code, 1)
+        self.assertFalse((self.root / "agents/agent").exists())
+
+    def test_guided_prompts_do_not_hold_lifecycle_lock(self):
+        def answers():
+            for value in ["", "", "", "ab" * 32, "wss://relay.example", "", "yes"]:
+                self.assertFalse((self.root / ".lock").exists())
+                yield value
+
+        code, _, err = self.guided(answers())
+        self.assertEqual(code, 0, err)
 
     def test_persistent_identity_configuration_and_intent(self):
         first = self.create()

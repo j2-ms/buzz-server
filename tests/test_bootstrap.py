@@ -37,6 +37,16 @@ class BootstrapTests(unittest.TestCase):
             name='buzz-server.pyz', id=42, size=len(self.data),
             digest='sha256:' + hashlib.sha256(self.data).hexdigest())])
 
+    def test_packaged_create_without_terminal_refuses_without_state(self):
+        state = self.base / 'state'
+        p = subprocess.run(['/usr/bin/python3', str(self.artifact), '--json', '--state-dir', str(state),
+                            'create', 'agent'], input=b'', capture_output=True, timeout=5)
+        self.assertEqual(p.returncode, 1)
+        response = json.loads(p.stderr)
+        self.assertEqual(response['error']['code'], 'interactive_required')
+        self.assertEqual(p.stdout, b'')
+        self.assertFalse(state.exists())
+
     def test_contract_matches_updater(self):
         self.assertEqual(bootstrap.candidate(self.metadata), release.candidate(self.metadata, '0.0.0'))
 

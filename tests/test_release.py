@@ -266,16 +266,16 @@ class ReleaseTests(unittest.TestCase):
                          {'buzz': '/usr/bin/buzz', 'buzz-acp': None, 'goose': None})
         run.assert_not_called()
 
-    def test_install_guidance_shows_goose_path_and_next_step(self):
+    def test_install_guidance_shows_next_step_without_manual_goose_path(self):
         from buzz_server import cli
         data = dict(version='1.0.0', prefix=str(self.prefix), missing_runtime_tools=['buzz'],
                     runtime_tool_paths={'buzz': None, 'buzz-acp': '/usr/bin/buzz-acp', 'goose': '/usr/local/bin/goose'})
         text = cli.render('install', data)
-        self.assertIn('/usr/local/bin/goose', text)
-        self.assertIn('harness.command', text)
+        self.assertNotIn('/usr/local/bin/goose', text)
+        self.assertNotIn('harness.command', text)
         self.assertIn('https://github.com/block/buzz/releases/tag/desktop-v0.5.30', text)
-        self.assertIn('doctor', text)
-        self.assertIn('buzz-server update does not update privately installed runtime tools', text)
+        self.assertIn('buzz-server doctor', text)
+        self.assertIn('custom prefix', text)
 
     def offer(self, answer='yes\n', **kwargs):
         if os.getuid() == 0:
