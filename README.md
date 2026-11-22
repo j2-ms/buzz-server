@@ -1,45 +1,49 @@
 # Buzz Server
 
-Run and manage [Buzz](https://github.com/block/buzz) agents on a headless Linux host. You can install, configure, start, stop, inspect, and remove agents without running Buzz Desktop. Buzz Server manages the Linux services; it does not replace the relay or the agent runtime.
+Run and manage [Buzz](https://github.com/block/buzz) agents on a headless Linux host without running Buzz Desktop. Buzz Server manages the Linux services; v0.1 supports [Goose](https://github.com/aaif-goose/goose) as its only agent runtime. Bring a Buzz relay you can use and a model supported by Goose.
 
 ## First install from a public release
 
-Ubuntu 24.04 amd64 is the reference platform. This path requires a published
-stable release with assets in `j2-ms/buzz-server`.
-Use an existing unprivileged Linux account and `/usr/bin/python3` 3.12+.
-No GitHub CLI installation, login or credential file is needed.
+Ubuntu 24.04 amd64 is the reference platform. Use `/usr/bin/python3` 3.12+
+and an existing [unprivileged service account](docs/service-accounts.md)
+with a working `systemctl --user`. If agents should keep running after logout
+or start at boot, ask your administrator to enable linger for that account.
+No GitHub CLI, login or credential file is needed.
 
-Obtain the reviewed **install-buzz-server.py** asset from the
-[public stable GitHub release](https://github.com/j2-ms/buzz-server/releases/latest).
-Save it in a private directory and run the local file:
+Download **install-buzz-server.py** from the **Assets** section of the
+[latest stable release](https://github.com/j2-ms/buzz-server/releases/latest).
+Save it in a private directory, open a terminal there as the service account,
+and run:
 
 ```sh
 /usr/bin/python3 -I ./install-buzz-server.py --prefix "$HOME/.local/buzz-server-cli"
 ```
 
-No clone, pip, checksum copying or asset IDs are needed. The bootstrap is trusted
-through this exact repository's GitHub Release and its publishers; it has no
-independent signature. It anonymously downloads the stable app over direct,
-verified HTTPS and checks release metadata, SHA-256, byte limits, exact size and
-embedded version before executing the app. Fresh installations enable interactive
-update offers by default. These offers require consent before downloading or
-activating an update; explicit `update` remains available.
+To run an agent you need `buzz`, `buzz-acp`, and `goose`. If any are missing,
+the interactive installer shows what it would download and asks once (default
+**no**). On a fresh Ubuntu 24.04 amd64 account, accept to install the pinned
+upstream tools into private storage. If you decline, Buzz Server is still installed;
+install the missing tools before continuing. For noninteractive install, use
+`--install-dependencies` or `--skip-dependencies` to choose explicitly.
 
-By default, installation downloads only verified Buzz Server. When tools are missing
-and stdin/stdout/stderr are terminals, it shows the existing tools, missing tools,
-roles and pinned download destinations, then asks once (default **no**).
-`--install-dependencies` explicitly opts in without a prompt; `--skip-dependencies`
-suppresses the prompt. `--json` never prompts. Optional private downloads support
-Ubuntu 24.04 amd64 initially: only Buzz CLI, buzz-acp and Goose are acquired from
-their upstream releases, with pinned sizes and SHA-256 checks. No desktop package
-installation, accounts or service changes occur.
+You now have the manager and any tools you chose to install, **not a configured or
+running agent**. Check local prerequisites, then follow the
+[agent setup guide](docs/quickstart.md) to configure Goose, grant access, and verify
+that the agent replies in the original test thread:
 
-Install status is not provider or relay readiness. Use the reported absolute Goose
-path as `harness.command` in agent JSON passed with `--config`. Next run
-`"$HOME/.local/buzz-server-cli/bin/buzz-server" doctor` (or `doctor --config FILE`
-for an existing configured Goose path). See the [release guide](docs/releases.md)
-for private tools, retry, custom directories, offline installation and removal,
-then the [agent setup guide](docs/quickstart.md).
+```sh
+"$HOME/.local/buzz-server-cli/bin/buzz-server" doctor
+```
+
+Use your chosen prefix if it differs. `doctor` does not check relay admission or
+provider credentials. For a retry, a custom Goose path, offline installation,
+or removal, see the [release guide](docs/releases.md).
+
+No clone, pip or checksum copying is needed. Trust the bootstrap from this
+repository's GitHub Release; it has no independent signature. It verifies the
+app's HTTPS download, exact size, SHA-256 and embedded version before running it.
+Fresh installs offer updates before an interactive command; they activate only
+with your consent. Scripts and JSON output never prompt.
 
 ## Install from source
 
@@ -63,6 +67,9 @@ Follow the [agent setup guide](docs/quickstart.md) to configure credentials, cre
 
 Start with `buzz-server --help` to see all commands. See [Contributing](CONTRIBUTING.md) for development and [Vision](VISION.md) for the scope of future work.
 
-## License
+## Credits and license
 
-Buzz Server is licensed under [Apache-2.0](LICENSE).
+Buzz Server is licensed under [Apache-2.0](LICENSE). It uses the separately
+released [Buzz CLI and ACP](https://github.com/block/buzz) and
+[Goose](https://github.com/aaif-goose/goose); their binaries are not bundled in
+Buzz Server's release assets.
