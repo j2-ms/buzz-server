@@ -6,7 +6,7 @@ Optional private prerequisite downloads never change host services.
 
 ## First install
 
-Use the [public-release instructions in README](../README.md#first-install-from-a-public-release).
+Use the [public-release instructions in README](../README.md#install).
 Both bootstrap and updater pin `repos/j2-ms/buzz-server`. Neither supports an
 endpoint or repository override.
 The first-install asset is **install-buzz-server.py**, published from the standalone,
@@ -72,15 +72,14 @@ components. Do not use a source installation's prefix. An already verified offli
 ### Optional private prerequisites
 
 Default installation downloads only verified Buzz Server. If tools are missing
-and all three streams are TTYs, installation lists existing/missing tools, roles,
+and the installer has a terminal, installation lists existing/missing tools, roles,
 pinned source/version and private destination, explains that no sudo or services
-are involved, then asks `Install missing tools? [y/N]`. Declining leaves the CLI
-installed. Noninteractive and `--json` invocations never prompt.
+are involved, then asks `Install missing tools? [Y/n]`. Declining leaves the CLI
+installed. When bootstrap input is piped, it reopens the controlling terminal for consent if output is terminal-bound. Noninteractive and `--json` invocations never prompt.
 
 Both the bootstrap and the verified zipapp's `install` command accept mutually
 exclusive `--install-dependencies` (explicit noninteractive consent) and
-`--skip-dependencies` (suppress prompts). For example, append
-`--install-dependencies` to the README bootstrap command, or retry
+`--skip-dependencies` (suppress prompts). For example, pass `--install-dependencies` to the downloaded bootstrap, or retry
 an already verified local artifact:
 
 ```sh
@@ -88,7 +87,7 @@ an already verified local artifact:
 ```
 
 Use the original `--state-dir` and `--unit-dir` global arguments when customized.
-Managed downloads refuse root and support **Ubuntu 24.04 amd64** initially. On
+Managed downloads refuse root and allow **Ubuntu 24.04 and 26.04 amd64**. Pinned binary compatibility on 26.04 has not been tested. On
 compatible other Linux hosts, install compatible upstream tools manually in
 `/usr/local/bin`, `/usr/bin` or `/bin`. No ambient PATH is searched. Existing system
 tools take precedence, then private tools in the installation's bound
@@ -269,3 +268,5 @@ contains the same SHA-256 digest and size. Missing or invalid GitHub digests are
 rejected by the updater. No alternate endpoints or update servers are supported.
 No publishing, tagging, service changes or live provider/relay calls occur in the
 builder or unit tests. See [verification](testing.md) for outstanding gates.
+
+For the default prefix the installer adds `~/.local/bin/buzz-server`. If your shell does not find it, run `"$HOME/.local/bin/buzz-server" doctor` and consult your distribution’s instructions for enabling `~/.local/bin` on PATH. Custom prefixes use their own `bin/buzz-server`.

@@ -2,6 +2,7 @@
 """Independent first installer. Publish unchanged as install-buzz-server.py."""
 import argparse
 import ast
+import contextlib
 import hashlib
 import json
 import multiprocessing
@@ -231,6 +232,28 @@ def parser():
     return p
 
 
+@contextlib.contextmanager
+def terminal(args):
+    # A curl pipe is source input, never consent input. Reopen only the controlling
+    # terminal, and only when output is also terminal-bound. Batch flags and JSON
+    # must not access it. The verified installer receives an actual terminal fd.
+    if not args.json and all(s.isatty() for s in (sys.stdout, sys.stderr)):
+        if sys.stdin.isatty():
+            yield None, True
+            return
+        if not (args.install_dependencies or args.skip_dependencies):
+            try:
+                stream = open('/dev/tty', 'r')
+            except OSError:
+                stream = None
+            if stream is not None:
+                with stream:
+                    if stream.isatty():
+                        yield stream, True
+                        return
+    yield subprocess.DEVNULL, False
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     structured = '--json' in argv
@@ -260,14 +283,14 @@ def main(argv=None):
                 command.append('--install-dependencies')
             if args.skip_dependencies:
                 command.append('--skip-dependencies')
-            interactive = not args.json and all(s.isatty() for s in (sys.stdin, sys.stdout, sys.stderr))
             # This is the first execution of downloaded code. Its own install
             # handles state binding and per-step limits. Do not time a user's
             # decision at the consent prompt with the noninteractive deadline.
             try:
-                result = subprocess.run(command, stdin=None if interactive else subprocess.DEVNULL,
-                                        env=environment(Path.home()), cwd=directory,
-                                        timeout=None if interactive else 600)
+                with terminal(args) as (stdin, interactive):
+                    result = subprocess.run(command, stdin=stdin,
+                                            env=environment(Path.home()), cwd=directory,
+                                            timeout=None if interactive else 600)
                 if result.returncode >= 0:
                     return result.returncode
             except (subprocess.TimeoutExpired, KeyboardInterrupt):

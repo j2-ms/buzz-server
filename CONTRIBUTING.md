@@ -6,7 +6,7 @@ For a security concern, use private vulnerability reporting under the repository
 
 ## Develop and verify
 
-Use Python 3.12+ on Linux. The CLI uses the standard library; there is no dependency installation or build step. See the [README prerequisites](README.md#install-from-source) for local tools and the reference test environment.
+Use Python 3.12+ on Linux. The CLI uses the standard library; there is no dependency installation or build step. See the [release guide](docs/releases.md) for local tools and the reference test environment.
 
 ```sh
 python3 -B -m unittest discover -s tests -v

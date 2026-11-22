@@ -98,8 +98,8 @@ def supported():
         info = platform.freedesktop_os_release()
     except OSError:
         refused()
-    if sys.platform != 'linux' or platform.machine() != 'x86_64' or info.get('ID') != 'ubuntu' or info.get('VERSION_ID') != '24.04':
-        raise Error('dependency_platform', 'Managed downloads support Ubuntu 24.04 amd64 only. Install compatible upstream tools manually on other Linux hosts.')
+    if sys.platform != 'linux' or platform.machine() != 'x86_64' or info.get('ID') != 'ubuntu' or info.get('VERSION_ID') not in ('24.04', '26.04'):
+        raise Error('dependency_platform', 'Managed downloads support Ubuntu 24.04 and 26.04 amd64 only. Install compatible upstream tools manually on other Linux hosts.')
     if os.getuid() == 0:
         raise Error('root_denied', 'Run prerequisite installation as an unprivileged user.')
 
@@ -298,9 +298,9 @@ def install(store, *, opted, skip, structured):
             print(f"  {name}: {current[name] or 'missing'}; {ROLES[name]}", file=sys.stderr)
             if not current[name]:
                 print(f"    planned: {package['url']} ({package['version']}) -> {store.root / 'tools/bin' / name}", file=sys.stderr)
-        print('Private downloads only; no sudo, desktop installation, services or agent changes. Managed downloads require Ubuntu 24.04 amd64.', file=sys.stderr)
+        print('Private downloads only; no sudo, desktop installation, services or agent changes. Managed downloads require Ubuntu 24.04 or 26.04 amd64.', file=sys.stderr)
         try:
-            opted = input('Install missing tools? [y/N] ').strip().lower() in ('y', 'yes')
+            opted = input('Install missing tools? [Y/n] ').strip().lower() in ('', 'y', 'yes')
         except EOFError:
             opted = False
     if opted and not skip:

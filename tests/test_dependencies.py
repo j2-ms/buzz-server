@@ -85,13 +85,29 @@ class DependencyTests(unittest.TestCase):
                 d.probe('/unused', ['--help'], [], Path(self.temp.name))
         self.assertNotIn('private-probe', str(error.exception))
 
-    def test_default_no_tty_decline_and_json_never_prompt(self):
-        for structured, tty, answer in ((False, False, 'yes'), (True, True, 'yes'), (False, True, ''), (False, True, 'no')):
+    def test_no_tty_decline_and_json_never_prompt(self):
+        for structured, tty, answer in ((False, False, 'yes'), (True, True, 'yes'), (False, True, 'no')):
             with (patch.object(d, 'paths', return_value=dict.fromkeys(d.NAMES)),
                   patch.object(d, 'interactive', return_value=tty), patch('builtins.input', return_value=answer),
                   patch.object(d, 'acquire') as acquire, patch('sys.stderr', io.StringIO())):
                 d.install(self.store, opted=False, skip=False, structured=structured)
                 acquire.assert_not_called()
+
+    def test_empty_answer_accepts_and_platform_allowlist_is_exact(self):
+        with (patch.object(d, 'paths', return_value=dict.fromkeys(d.NAMES)),
+              patch.object(d, 'interactive', return_value=True), patch('builtins.input', return_value=''),
+              patch.object(d, 'supported', side_effect=Error('fixture', 'fixture')) as supported,
+              patch('sys.stderr', io.StringIO())):
+            d.install(self.store, opted=False, skip=False, structured=False)
+            supported.assert_called_once()
+        with (patch.object(d.platform, 'machine', return_value='x86_64'),
+              patch.object(d.os, 'getuid', return_value=1000), patch.object(d.sys, 'platform', 'linux')):
+            for version in ('24.04', '26.04', '25.04'):
+                with self.subTest(version=version), patch.object(d.platform, 'freedesktop_os_release', return_value={'ID': 'ubuntu', 'VERSION_ID': version}):
+                    if version == '25.04':
+                        with self.assertRaises(Error): d.supported()
+                    else:
+                        d.supported()
 
     def test_system_tools_reused_without_fetch(self):
         with patch.object(d, 'paths', return_value={n: '/usr/bin/' + n for n in d.NAMES}), patch.object(d, 'acquire') as acquire:
@@ -276,7 +292,7 @@ class DependencyTests(unittest.TestCase):
         for value in ('/usr/bin/buzz', 'missing', 'ACP adapter', 'desktop-v0.5.30', 'v1.60.2',
                       str(self.store.root / 'tools/bin/goose'), 'no sudo', 'no sudo, desktop installation, services'):
             self.assertIn(value, output.getvalue())
-        ask.assert_called_once_with('Install missing tools? [y/N] ')
+        ask.assert_called_once_with('Install missing tools? [Y/n] ')
 
     def test_runtime_prepare_selects_managed_adapter_and_buzz(self):
         from buzz_server import runtime

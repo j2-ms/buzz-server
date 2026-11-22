@@ -273,7 +273,7 @@ def render(operation, data):
         else:
             lines.append("Install Goose, then set harness.command in agent JSON to its exact absolute executable path.")
         lines.append("buzz-server update does not update privately installed runtime tools.")
-        lines.append("Presence is not a compatibility check. Next: run this prefix's bin/buzz-server doctor, then follow docs/quickstart.md. No services started; install status does not prove relay/provider readiness.")
+        lines.append("Presence is not a compatibility check. Next: run buzz-server doctor (or the prefix bin/buzz-server for a custom prefix), then follow docs/quickstart.md. If the command is not found, run ~/.local/bin/buzz-server doctor; see docs/releases.md for PATH guidance. No services started; install status does not prove relay/provider readiness.")
         return "\n".join(lines)
     return json.dumps(data, indent=2)
 
