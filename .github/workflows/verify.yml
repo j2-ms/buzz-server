@@ -1,0 +1,45 @@
+name: Verify
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Offline verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check committed whitespace
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            git diff --check HEAD^1 HEAD
+          else
+            git diff-tree --root --check -r HEAD
+          fi
+      - name: Run offline unit tests
+        run: |
+          test "$(id -u)" != 0
+          /usr/bin/python3 -B -m unittest discover -s tests -v
+      - name: Verify release build and version agreement
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/buzz-release.XXXXXXXX")
+          version=$(/usr/bin/python3 -B entry.py --version)
+          test "$version" = "$(/usr/bin/python3 -IB scripts/bootstrap.py --version)"
+          /usr/bin/python3 -B scripts/build_release.py --version "$version" --output "$stage/buzz-server.pyz"
+          /usr/bin/python3 -B scripts/build_release.py --version "$version" --output "$stage/rebuild.pyz"
+          test "$version" = "$(/usr/bin/python3 -IB "$stage/buzz-server.pyz" --version)"
+          cmp "$stage/buzz-server.pyz" "$stage/rebuild.pyz"
