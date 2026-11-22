@@ -25,6 +25,8 @@ the interactive installer shows what it would download and asks once (default
 upstream tools into private storage. If you decline, Buzz Server is still installed;
 install the missing tools before continuing. For noninteractive install, use
 `--install-dependencies` or `--skip-dependencies` to choose explicitly.
+When setting up the agent, use the absolute Goose path printed by the installer
+as `harness.command` in the agent's configuration.
 
 You now have the manager and any tools you chose to install, **not a configured or
 running agent**. Check local prerequisites, then follow the
