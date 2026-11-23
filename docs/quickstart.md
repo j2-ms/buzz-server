@@ -47,6 +47,17 @@ at the target UID with that agent's private HOME, not the operator's settings.
 It does not grant the agent sudo. Goose exiting successfully does not prove
 provider readiness.
 
+### Custom OpenAI-compatible endpoint
+
+In the Goose wizard, choose **Custom Providers** → **Add A Custom Provider** →
+**OpenAI Compatible**. Give the provider a display name and enter its full API
+base URL (for example, `https://models.example.com/v1`). Answer the authentication
+and streaming prompts according to your provider, enter the model ID under
+**Available models**, and choose it as the default. Leave **API base path** blank
+for a standard `/v1/chat/completions` endpoint and skip custom headers unless
+your provider requires them. Do not append `/chat/completions` to the API URL.
+You do not need the built-in OpenAI provider's advanced settings for this route.
+
 ### First reply
 
 1. Copy the public key from `Buzz identity:` in `buzz-server show assistant`.
@@ -79,7 +90,11 @@ provider readiness.
    buzz messages thread --channel "$CHANNEL_ID" --event EVENT_ID
    ```
 
-   Use the event ID returned by `send`. A running service is not a posted reply.
+   Use the event ID returned by `send`. If you only see your message, refresh the
+   thread or repeat the thread query every 10–15 seconds for up to a minute
+   before treating it as a no-reply case. This is a first check, not a response
+   deadline; allow longer if your model is known to be slow. A running service
+   is not a posted reply.
 
 ## Alternatives
 
@@ -127,6 +142,9 @@ commands retain their behavior. See the [account guide](service-accounts.md).
 
 ### If no reply appears
 
+If you haven't already waited and checked the original thread as described
+above, do that before sending another mention.
+
 1. Check the receiving relay and channel. Ask the operator to confirm that the
    agent key is admitted, and verify channel membership for that exact key.
 2. Confirm you sent the mention from the hex public key in `owner`, and that the
@@ -135,7 +153,7 @@ commands retain their behavior. See the [account guide](service-accounts.md).
    Fix startup failures first. Lifecycle logs do not expose model output or
    credentials. To redo provider setup, run `buzz-server stop assistant`, then
    `buzz-server inference configure assistant`, then `buzz-server start assistant`.
-4. If steps 1–3 check out, retry once with a synthetic message explicitly asking
+4. If steps 1–3 check out and the original thread still has no reply, retry once with a synthetic message explicitly asking
    the agent to post in the original thread. Plain model text alone is not
    published; the harness needs to use the Buzz messaging tool path. If it still
    fails, report the CLI/Goose versions, lifecycle status and what each check

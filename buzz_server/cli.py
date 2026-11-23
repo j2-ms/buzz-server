@@ -143,14 +143,14 @@ def execute(args):
             dedicated_guided = guided_create(args.id, Path(selected.data) / "state/agents" / args.id,
                                               Path(selected.data) / "state", selected)
     if args.operation == "doctor" and args.account:
-        entry = account(args.account)
+        entry = account(args.account, diagnose=True)
         from .account_process import run
         result = run(["/usr/bin/systemctl", "--system", "show", "--property=Version", "--value"],
                      env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}, cwd="/", umask=0o077)
         if result.returncode or not result.stdout.strip():
             raise Error("supervisor_unavailable", "Cannot verify the system manager; inspect systemctl --system locally.")
         # Recheck after the observation; no account readiness/live reply claim.
-        if account(args.account) != entry:
+        if account(args.account, diagnose=True) != entry:
             raise Error("account_binding", "The selected account changed during the check.")
         return {"service_account": {"name": entry.pw_name, "uid": entry.pw_uid}, "systemd_system": "verified",
                 "runtime_started": False, "buzz_response_verified": False, "credentials_checked": False}

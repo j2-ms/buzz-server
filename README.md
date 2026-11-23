@@ -26,6 +26,7 @@ buzz-server inference configure assistant
 The CLI handles paths and permissions; the agent gets neither the management
 CLI nor `sudo`. Follow [First reply](docs/quickstart.md#first-reply) to add the
 agent to a channel, start it, and check that it replies in your Buzz thread.
+For a custom OpenAI-compatible endpoint, see [Goose provider setup](docs/quickstart.md#custom-openai-compatible-endpoint).
 
 See the [account guide](docs/service-accounts.md) for isolation, retained data and
 same-account use; the [release guide](docs/releases.md) for installer verification,

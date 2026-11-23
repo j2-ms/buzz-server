@@ -10,46 +10,55 @@ from pathlib import Path
 import pwd
 import re
 import stat
+from typing import NoReturn
 
 from .errors import Error
 from .storage import agent_id, private_dir, read_json, write_json
 
 
-def refused():
+def refused() -> NoReturn:
     raise Error("account_binding", "Dedicated-account authorization is missing, changed or unsafe. No privileged action was authorized; inspect the operator binding and existing account offline.")
 
 
-def account(name):
-    if not isinstance(name, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", name):
+def account(name, *, diagnose=False):
+    def reject(prerequisite) -> NoReturn:
+        if diagnose:
+            raise Error("account_binding", prerequisite + " Ask the host administrator to check the dedicated account, then rerun doctor. No privileged action was authorized.")
         refused()
+
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", name):
+        reject("Use a valid Linux account name for --account.")
     try:
         entry = pwd.getpwnam(name)
         reverse = pwd.getpwuid(entry.pw_uid)
     except KeyError:
-        refused()
+        reject("The dedicated account must exist and resolve by name and UID.")
     if (type(entry.pw_uid) is not int or entry.pw_uid <= 0 or entry.pw_uid == os.getuid()
             or type(entry.pw_gid) is not int or entry.pw_gid <= 0
             or entry.pw_name != name or reverse.pw_name != name
             or reverse.pw_dir != entry.pw_dir or reverse.pw_gid != entry.pw_gid):
-        refused()
+        reject("The dedicated account needs a non-root UID distinct from the operator, a non-root GID, and matching name and UID records.")
     home = Path(entry.pw_dir)
     # A deliberately narrow layout makes unit escaping and authority auditable.
     # The administrator supplies the account; this code never repairs its home.
     if (not re.fullmatch(r"/[A-Za-z0-9_./-]+", entry.pw_dir) or home == Path("/")
             or str(home) != entry.pw_dir or ".." in home.parts):
-        refused()
-    try:
-        for path in (home, *home.parents):
+        reject("The dedicated account needs an absolute, normalized home path in the supported format.")
+    for path in (home, *home.parents):
+        location = "The dedicated account's home" if path == home else "A parent of the dedicated account's home"
+        try:
             s = path.lstat()
-            if not stat.S_ISDIR(s.st_mode):
-                refused()
-            if path == home:
-                if s.st_uid != entry.pw_uid or stat.S_IMODE(s.st_mode) != 0o700:
-                    refused()
-            elif s.st_uid != 0 or stat.S_IMODE(s.st_mode) & 0o022:
-                refused()
-    except OSError:
-        refused()
+        except OSError:
+            reject(location + " could not be checked; verify that it exists and can be reached from the operator login.")
+        if not stat.S_ISDIR(s.st_mode):
+            reject(location + " must be a real directory, not a symlink or file.")
+        if path == home:
+            if s.st_uid != entry.pw_uid:
+                reject(location + " must be owned by that account.")
+            if stat.S_IMODE(s.st_mode) != 0o700:
+                reject(location + " must have mode 0700.")
+        elif s.st_uid != 0 or stat.S_IMODE(s.st_mode) & 0o022:
+            reject(location + " must be root-owned and not writable by group or others.")
     return entry
 
 

@@ -6,7 +6,9 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import struct
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -239,11 +241,34 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertFalse(self.model.active)
 
     def test_dedicated_doctor_needs_no_operator_user_manager_or_sudo(self):
-        from types import SimpleNamespace
         with patch("buzz_server.account_process.run", return_value=SimpleNamespace(returncode=0, stdout=b"fixture-systemd\n")) as query, patch("buzz_server.cli.Systemd.check", side_effect=AssertionError("user manager must not be checked")):
             result = self.call("doctor", "--account", "fixture")
         self.assertEqual(query.call_args.args[0], ["/usr/bin/systemctl", "--system", "show", "--property=Version", "--value"])
         self.assertIs(result["buzz_response_verified"], False)
+        self.run.assert_not_called()
+
+    def test_dedicated_doctor_explains_home_prerequisite_without_repair(self):
+        original = Path.lstat
+        for path, mode, uid, expected in (
+            (self.entry.pw_dir, stat.S_IFDIR | 0o750, self.entry.pw_uid, "mode 0700"),
+            (self.entry.pw_dir, stat.S_IFDIR | 0o700, 0, "owned by that account"),
+            (self.entry.pw_dir, stat.S_IFLNK | 0o777, self.entry.pw_uid, "real directory"),
+            ("/home", stat.S_IFDIR | 0o775, 0, "not writable by group or others"),
+        ):
+            def layout(candidate):
+                if candidate == Path(path):
+                    return SimpleNamespace(st_mode=mode, st_uid=uid)
+                return original(candidate)
+
+            with self.subTest(path=path, mode=mode, uid=uid), patch("buzz_server.accounts.Path.lstat", layout):
+                result = self.call("doctor", "--account", "fixture", success=False)
+                assert isinstance(result, dict)
+                self.assertEqual(result["code"], "account_binding")
+                self.assertIn(expected, result["message"])
+                self.assertIn("host administrator", result["message"])
+                self.assertNotIn(self.entry.pw_dir, result["message"])
+                self.assertNotIn("binding", result["message"])
+                self.assertFalse(self.bindings.path("assistant").exists())
         self.run.assert_not_called()
 
     def test_uninstall_checks_dedicated_inventory_under_both_exclusive_locks(self):
