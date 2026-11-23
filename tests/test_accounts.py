@@ -88,13 +88,19 @@ class AccountTests(unittest.TestCase):
     def test_untrusted_operator_state_ancestor_cannot_authorize_root_file_access(self):
         binding = self.reserve()
         original = Path.lstat
-        for parent, owner, mode in ((self.store.root.parent, self.entry.pw_uid, 0o700),
-                                    (Path.home(), os.getuid(), 0o777)):
+        parent = self.store.root.parent
+        # Keep the bad directory on the actual binding path, regardless of
+        # where TMPDIR lives. Model trusted, traversable ancestors so a private
+        # host home cannot shield the deliberately writable fixture directory.
+        ancestors = set(parent.parents)
+        for owner, mode in ((self.entry.pw_uid, 0o700), (os.getuid(), 0o777)):
             def replaced(path):
                 if path == parent:
                     return SimpleNamespace(st_uid=owner, st_mode=stat.S_IFDIR | mode)
+                if path in ancestors:
+                    return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
                 return original(path)
-            with patch("buzz_server.accounts.Path.lstat", replaced):
+            with self.subTest(owner=owner, mode=mode), patch("buzz_server.accounts.Path.lstat", replaced):
                 with self.assertRaises(Error):
                     Commands(self.bindings, binding).stage_unit(self.bindings.root / "assistant.unit")
         self.run.assert_not_called()
