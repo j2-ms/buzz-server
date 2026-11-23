@@ -49,7 +49,7 @@ provider readiness.
 
 ### Custom OpenAI-compatible endpoint
 
-On first run, choose **Manual Configuration** → **Search all providers…**.
+On first run, choose **Manual Configuration** → **Search all providers...**.
 Search for `OpenAI` and select **OpenAI** (described as “OpenAI models, including
 OpenAI compatible ones”). The **Custom Providers** menu is not available on a
 fresh Goose profile.
@@ -60,7 +60,8 @@ settings. Set `OPENAI_BASE_URL` to the full API base URL (for example,
 `https://models.example.com/v1`, without `/chat/completions`). Accept the
 `OPENAI_HOST` default and leave `OPENAI_BASE_PATH` blank; the explicit base URL
 takes precedence. Skip organization, project and header settings unless your
-provider requires them. Select your model and finish the wizard.
+provider requires them. Accept the `OPENAI_TIMEOUT` default, then select your
+model and finish the wizard.
 
 ### First reply
 
@@ -157,6 +158,8 @@ above, do that before sending another mention.
    Fix startup failures first. Lifecycle logs do not expose model output or
    credentials. To redo provider setup, run `buzz-server stop assistant`, then
    `buzz-server inference configure assistant`, then `buzz-server start assistant`.
+   If Goose already has a configuration, choose **Configure Providers** instead
+   of **Manual Configuration** and continue with the provider selection above.
 4. If steps 1–3 check out and the original thread still has no reply, retry once with a synthetic message explicitly asking
    the agent to post in the original thread. Plain model text alone is not
    published; the harness needs to use the Buzz messaging tool path. If it still
