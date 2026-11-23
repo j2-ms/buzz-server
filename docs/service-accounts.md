@@ -17,8 +17,10 @@ creates or retires accounts, configures login access, enables linger, or changes
 a relay. No target login or user manager is required.
 
 Run `buzz-server doctor --account ACCOUNT` from the operator login to check the
-account layout and reachability of the system manager without sudo. This does
-not check tools, provider credentials, relay admission or a live reply.
+account layout and reachability of the system manager without sudo. It does not
+verify the account's effective administrative permissions; the host administrator
+must check local policy, including direct grants as well as group membership.
+Doctor does not check tools, provider credentials, relay admission or a live reply.
 `account-plan --account ACCOUNT` is a read-only account-selection aid.
 
 `create ID --account ACCOUNT` guides you through the normal agent questions.
@@ -53,7 +55,10 @@ are acquired through the existing pinned archive verification and extraction pat
 
 This is a Unix account boundary, not a sandbox. Agent tools retain that account's
 permissions, including network access. Anyone able to execute as that UID can
-read its prompts, keys and credentials. Target reports never select a privileged
+read its prompts, keys and credentials. Interactive `inference configure` also
+attaches target-writable worker code to the operator's terminal. Do not use it
+from your operator session if you suspect the account is compromised; ask the host
+administrator to handle recovery. Target reports never select a privileged
 command. Status reports system-service activity separately from runtime/provider
 or Buzz verification. The unit is persistent and enabled by start, but unattended
 boot/reboot operation and the real dedicated-account lifecycle have not been

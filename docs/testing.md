@@ -15,10 +15,12 @@ check needs no operator user manager. Same-account tests remain separate.
 `test_accounts.py` checks binding corruption/remapping and fixed UID/argv/env.
 It also rejects operator unit-source paths replaceable through untrusted ancestors.
 `test_account_supervisor.py` checks effective-unit mismatches, staged publication,
-typed retry journals, cgroup refusal and interrupted removal. These use a synthetic
-manager, including a missing fragment that still has live or unknown process state;
+typed retry journals, cgroup refusal and interrupted removal. The synthetic manager
+models omitted empty hook and environment-file lists from `systemctl show --all`
+on systemd 255; missing required fields and nonempty hooks still fail closed. It
+also models a missing fragment that still has live or unknown process state;
 retry must verify stopped state and empty cgroup before its reload or deletion.
-They do not establish real systemd serialization or sudo behavior.
+These fixtures do not establish real systemd serialization or sudo behavior.
 `test_account_target.py` executes file operations and synthetic tool scripts only
 inside private scratch directories at the unprivileged test UID, with synthetic
 NSS. It verifies permissions, identity/private-state retention, interrupted staging

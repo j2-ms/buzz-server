@@ -25,6 +25,7 @@ class FakeCommands:
         self.enabled = False
         self.active = False
         self.overrides = {}
+        self.omit_empty_structured = True
         self.fail = None
 
     def effect(self, operation):
@@ -45,7 +46,13 @@ class FakeCommands:
                  ExecStart="{ path=/usr/bin/python3 ; argv[]=" + " ".join(self.supervisor.argv) +
                            " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }")
         s.update(self.overrides)
-        return ("\n".join(k + "=" + v for k, v in s.items()) + "\n").encode()
+        # systemctl 255's structured-array printer emits no line for an
+        # empty hook list or EnvironmentFiles, even with --all.
+        omitted_when_empty = {"ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop",
+                              "ExecStopPost", "ExecReload", "EnvironmentFiles"}
+        return ("\n".join(k + "=" + v for k, v in s.items()
+                          if v is not None and (v or not self.omit_empty_structured
+                                                or k not in omitted_when_empty)) + "\n").encode()
 
     def reload(self):
         self.effect("reload")
@@ -110,6 +117,30 @@ class AccountSupervisorTests(unittest.TestCase):
         for forbidden in ("ExecStartPre", "ExecStartPost", "ExecStop", "sudo", "entry.py", "buzz-server _worker", "+/", "!/", "EnvironmentFile"):
             self.assertNotIn(forbidden, content)
 
+    def test_structured_empty_lists_can_be_omitted_or_printed(self):
+        self.supervisor.install()
+        self.assertFalse(self.supervisor.journal.exists())
+        omitted = self.supervisor.inspect()
+        self.assertNotIn("ExecStop", omitted)
+        self.assertNotIn("EnvironmentFiles", omitted)
+        self.assertEqual(omitted["PassEnvironment"], "")
+
+        self.commands.omit_empty_structured = False
+        printed = self.supervisor.inspect()
+        self.assertEqual(printed["ExecStop"], "")
+        self.assertEqual(printed["EnvironmentFiles"], "")
+
+    def test_missing_required_manager_fields_refuse_before_service_effects(self):
+        self.install()
+        for key in ("Id", "User", "Group", "ExecStart", "FragmentPath", "DropInPaths",
+                    "Environment", "PassEnvironment", "NoNewPrivileges", "ControlGroup"):
+            with self.subTest(key=key):
+                self.commands.overrides = {key: None}
+                with self.assertRaises(Error) as raised:
+                    self.supervisor.start()
+                self.assertEqual(raised.exception.code, "unit_conflict")
+                self.assertEqual(self.commands.effects, [])
+
     def test_boolean_journal_version_cannot_authorize_retry_effect(self):
         for operation, action in (("install", self.supervisor.install), ("remove", self.supervisor.remove)):
             write_json(self.supervisor.journal, {"version": True, "operation": operation})
@@ -171,6 +202,7 @@ class AccountSupervisorTests(unittest.TestCase):
                            ("DropInPaths", "/etc/systemd/system/service.d/override.conf"),
                            ("NeedDaemonReload", "yes"), ("ExecStart", execution.replace(" -I ", " -E ")),
                            ("ExecStartPre", "/untrusted"), ("EnvironmentFiles", "/home/fixture/env"),
+                           ("PassEnvironment", "FIXTURE"),
                            ("NoNewPrivileges", "no"), ("KillMode", "process"), ("RootDirectory", "/home/fixture")):
             self.commands.overrides = {key: value}
             for action in (self.supervisor.start, self.supervisor.stop, self.supervisor.remove):

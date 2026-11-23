@@ -5,13 +5,14 @@ the bound numeric UID/GID before invoking the fixed Python worker command.
 """
 import re
 import stat
+from typing import NoReturn
 
 from .errors import Error
 from .storage import atomic, read_json, write_json
 from .supervisor import cgroup_empty
 
 
-def conflict():
+def conflict() -> NoReturn:
     raise Error("unit_conflict", "The trusted system manager or root-owned unit does not match the operator binding. No service effect was authorized. Inspect locally; keep private state.")
 
 
@@ -104,11 +105,14 @@ class AccountSystemd:
                     "FragmentPath": str(self.commands.unit_path), "DropInPaths": "",
                     "NeedDaemonReload": state["NeedDaemonReload"] if removing else "no", "KillMode": "control-group",
                     "User": str(self.binding.uid), "Group": str(self.binding.gid),
-                    "Environment": "PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + self.binding.home,
+                    "Environment": "PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + self.binding.home, "PassEnvironment": "",
                     "WorkingDirectory": "/", "RootDirectory": "", "RootImage": "", "NoNewPrivileges": "yes"}
-        expected.update({p: "" for p in ("ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost",
-                                        "ExecReload", "EnvironmentFiles", "PassEnvironment")})
         if any(state.get(k) != v for k, v in expected.items()):
+            conflict()
+        # systemctl 255 omits empty structured arrays even with --all. The
+        # string-array printer still emits PassEnvironment=; require it above.
+        if any(state.get(k, "") != "" for k in ("ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop",
+                                               "ExecStopPost", "ExecReload", "EnvironmentFiles")):
             conflict()
         # Compare the manager's executable and complete argv, allowing only its
         # runtime accounting fields after ignore_errors. No second command.
