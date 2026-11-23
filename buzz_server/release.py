@@ -327,6 +327,8 @@ def uninstall(prefix):
         store = Store(m['state'])
         supervisor = Systemd(store, m['units'])
         with store.lock():
+            from .account_lifecycle import require_detached
+            require_detached(store)
             units = Path(m['units'])
             paths = list(units.glob('buzz-server-*.service')) if units.exists() else []
             docs = {ident: store.load(ident) for ident in store.ids()}

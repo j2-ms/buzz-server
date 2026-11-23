@@ -2,18 +2,34 @@
 
 Agent host management for [Buzz](https://github.com/block/buzz). Run agents on a Linux host without Buzz Desktop. Bring a Buzz relay and a model supported by [Goose](https://github.com/aaif-goose/goose).
 
-## Install
+## Run an agent from your operator login
 
-In Bash on Linux with Python 3.12+ and curl:
+Use Ubuntu 24.04 or 26.04 (amd64), Bash, Python 3.12+ and curl. You need `sudo`
+for administration and an existing [dedicated agent account](docs/service-accounts.md),
+such as `buzz-assistant`. Install the CLI from **your own login**:
 
 ```sh
 (set -o pipefail; curl --proto '=https' -fsSL https://github.com/j2-ms/buzz-server/releases/latest/download/install-buzz-server.py | /usr/bin/python3 -I -)
 ```
 
-Run `buzz-server doctor`. If your shell can't find it, open a fresh login shell and try again. See the [release guide](docs/releases.md) for other shells and how the bootstrap is verified.
+If the installer offers missing runtime tools, press Enter to install them.
+If your shell can't find `buzz-server`, open a fresh login shell. Have your
+[relay URL and Buzz public key](docs/quickstart.md) ready, then run:
 
-If runtime tools are missing, the installer lists them and offers pinned downloads (default Yes). Declining still installs the CLI. Managed downloads allow Ubuntu 24.04 and 26.04 amd64; compatibility of the pinned binaries on 26.04 has not been verified. For prerequisites, noninteractive flags, custom paths, updates and recovery, see the [release guide](docs/releases.md). `doctor` checks local prerequisites, not relay admission or provider credentials.
+```sh
+buzz-server doctor --account buzz-assistant
+buzz-server create assistant --account buzz-assistant
+buzz-server inference configure assistant
+```
 
-For agent configuration and operation, see the [agent setup guide](docs/quickstart.md). See [Contributing](CONTRIBUTING.md) for development and [Vision](VISION.md) for future scope.
+`create` asks for your Buzz public key, relay, and the agent's profile and prompt.
+The CLI handles paths and permissions; the agent gets neither the management
+CLI nor `sudo`. Follow [First reply](docs/quickstart.md#first-reply) to add the
+agent to a channel, start it, and check that it replies in your Buzz thread.
+
+See the [account guide](docs/service-accounts.md) for isolation, retained data and
+same-account use; the [release guide](docs/releases.md) for installer verification,
+automation and recovery; and [Contributing](CONTRIBUTING.md) and [Vision](VISION.md)
+for development and future scope.
 
 Buzz Server is licensed under [Apache-2.0](LICENSE). Buzz and Goose are separately released and are not bundled in Buzz Server's release assets.

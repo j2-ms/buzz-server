@@ -6,7 +6,7 @@ Optional private prerequisite downloads never change host services.
 
 ## First install
 
-Use the [public-release instructions in README](../README.md#install).
+Use the [public-release instructions in README](../README.md#run-an-agent-from-your-operator-login).
 Both bootstrap and updater pin `repos/j2-ms/buzz-server`. Neither supports an
 endpoint or repository override.
 The first-install asset is **install-buzz-server.py**, published from the standalone,
@@ -208,7 +208,16 @@ Metadata requests, consent reads and downloads hold no lifecycle lock; activatio
 revalidates the binding, version, preference and exact downloaded artifact under
 a short write lock.
 
-Uninstall preflights every managed unit in the bound state/unit directories,
+Dedicated-account workers/tools are staged independently of the operator CLI.
+Updating or reinstalling the CLI does not upgrade those payloads. There is no
+fleet upgrade mechanism. Uninstall checks dedicated bindings under the exclusive
+installation and state locks and refuses any attached, incomplete, corrupt or
+unverifiably removed binding before touching user units or the installation.
+Finish/retry dedicated deletion first; only verified deleted bindings allow
+uninstall, while retaining target private state and operator removal proofs.
+See the [account guide](service-accounts.md).
+
+For same-account agents, uninstall preflights every managed user unit in the bound state/unit directories,
 then verifies stop, disable and empty cgroups before removing managed units and
 installation payloads. Unknown ownership, overrides, unsafe files or unknown stop
 state block removal. A later failure can leave some agents stopped; retry after

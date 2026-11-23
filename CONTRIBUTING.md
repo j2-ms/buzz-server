@@ -18,4 +18,5 @@ Add a regression test for behavior changes. For changes to installation, the wor
 
 - [`cli.py`](buzz_server/cli.py) handles commands and output. [`config.py`](buzz_server/config.py), [`storage.py`](buzz_server/storage.py), and [`identity.py`](buzz_server/identity.py) own configuration and local state.
 - [`supervisor.py`](buzz_server/supervisor.py) manages user units. [`runtime.py`](buzz_server/runtime.py) launches [`buzz-acp`](https://github.com/block/buzz/tree/desktop-v0.5.30/crates/buzz-acp), which connects to [Goose](https://github.com/aaif-goose/goose) over ACP.
+- [`account_lifecycle.py`](buzz_server/account_lifecycle.py) routes dedicated-account operations; [`accounts.py`](buzz_server/accounts.py) owns private operator bindings. [`account_supervisor.py`](buzz_server/account_supervisor.py) verifies native system units before fixed system-tool effects. [`worker_payload.py`](buzz_server/worker_payload.py) assembles the separate worker archive.
 - See the [vision](VISION.md), [glossary](UBIQUITOUS_LANGUAGE.md), and [agent instructions](AGENTS.md) before changing the project boundaries.

@@ -22,7 +22,7 @@ class Parser(argparse.ArgumentParser):
 
 
 def parser():
-    p = Parser(description="Manage headless Buzz agents with systemd user services.")
+    p = Parser(description="Manage headless Buzz agents with native systemd services.")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--json", action="store_true", help="Versioned JSON response, including errors")
     p.add_argument("--state-dir", default=str(Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "buzz-server"))
@@ -40,13 +40,17 @@ def parser():
         if op == "update":
             sub.add_argument("--auto", choices=("on", "off"), help="Enable/disable interactive update offers; does not check now")
     doctor = commands.add_parser("doctor", help="Verify the user manager and installed runtime interface without connecting to a relay")
-    doctor.add_argument("--config", help="Private agent JSON; check its configured absolute Goose path")
+    checks = doctor.add_mutually_exclusive_group()
+    checks.add_argument("--config", help="Private agent JSON; check its configured absolute Goose path")
+    checks.add_argument("--account", help="Check an existing dedicated account and system manager instead of the operator user manager")
     commands.add_parser("list", help="List managed agents and observed service state")
     for op in ("create", "configure", "show", "status", "start", "restart", "stop", "logs", "delete"):
         sub = commands.add_parser(op)
         sub.add_argument("id", type=agent_id)
         if op in ("create", "configure"):
             sub.add_argument("--config", required=(op == "configure"), help="Private JSON configuration file; configure replaces the complete config")
+        if op == "create":
+            sub.add_argument("--account", help="Existing dedicated unprivileged account; authorize fixed system tools through explicit sudo")
         if op == "logs":
             sub.add_argument("--lines", type=int, default=30)
     sub = commands.add_parser("inference", help="Manage inference through upstream Goose")
@@ -128,6 +132,80 @@ def execute(args):
     if args.operation == "create" and not args.config and (args.json or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))):
         raise Error("interactive_required", "Guided creation requires a terminal on stdin/stdout/stderr; use --config for JSON or non-interactive creation.")
     store = Store(args.state_dir)
+    from . import account_lifecycle
+    from .accounts import Bindings, account
+    bindings = Bindings(store)
+    dedicated_guided = None
+    selected = None
+    if args.operation == "create" and args.account:
+        selected = bindings.expected(args.id, account(args.account))
+        if not args.config:
+            dedicated_guided = guided_create(args.id, Path(selected.data) / "state/agents" / args.id,
+                                              Path(selected.data) / "state", selected)
+    if args.operation == "doctor" and args.account:
+        entry = account(args.account)
+        from .account_process import run
+        result = run(["/usr/bin/systemctl", "--system", "show", "--property=Version", "--value"],
+                     env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}, cwd="/", umask=0o077)
+        if result.returncode or not result.stdout.strip():
+            raise Error("supervisor_unavailable", "Cannot verify the system manager; inspect systemctl --system locally.")
+        # Recheck after the observation; no account readiness/live reply claim.
+        if account(args.account) != entry:
+            raise Error("account_binding", "The selected account changed during the check.")
+        return {"service_account": {"name": entry.pw_name, "uid": entry.pw_uid}, "systemd_system": "verified",
+                "runtime_started": False, "buzz_response_verified": False, "credentials_checked": False}
+    account_guard = (contextlib.nullcontext() if args.operation == "create" and not args.account
+                     and not bindings.path(args.id).exists() and not bindings.path(args.id).is_symlink()
+                     else store.lock())
+    with account_guard:
+        if args.operation == "create" and args.account:
+            if bindings.expected(args.id, account(args.account)) != selected:
+                raise Error("account_binding", "The selected account changed while collecting configuration; no action was authorized.")
+            if args.config:
+                config.load(args.config)
+            path = bindings.path(args.id)
+            if path.exists() or path.is_symlink():
+                bound = bindings.load(args.id)
+                if bound.account != args.account:
+                    raise Error("account_binding", "This ID is bound to a different account; no action was authorized.")
+            else:
+                bound = bindings.reserve(args.id, args.account)
+            record = account_lifecycle.manifest_path(bindings, args.id)
+            if record.exists() or record.is_symlink():
+                doc = account_lifecycle.load(bindings, args.id)
+                if doc["phase"] != "creating":
+                    raise Error("already_exists", "This ID has managed or retained data. Use configure or choose another ID.")
+            else:
+                doc = {"version": 1, "id": args.id, "phase": "creating", "identity": None,
+                       "revision": 1, "desired": "stopped"}
+            lifecycle = account_lifecycle.Lifecycle(store, bound)
+            lifecycle.save(doc)
+            return lifecycle.create(doc, args.config, prepared=dedicated_guided, structured=args.json)
+        if args.operation == "list":
+            separate = []
+            for path in sorted(bindings.root.glob("*.json")):
+                # Only the exact binding filename grammar, never journal files.
+                if path.name.endswith((".agent.json", ".unit-operation.json")):
+                    continue
+                ident = agent_id(path.stem)
+                bound = bindings.load(ident)
+                doc = account_lifecycle.load(bindings, ident)
+                if doc["phase"] == "deleted":
+                    continue
+                lifecycle = account_lifecycle.Lifecycle(store, bound)
+                if doc["phase"] != "ready":
+                    raise Error("account_incomplete", "A dedicated-account lifecycle is incomplete. Retry the original create/delete command; private state and the binding were retained.")
+                separate.append(lifecycle.view(doc))
+            if not store.ids():
+                return {"agents": separate}
+        elif hasattr(args, "id") and (bindings.path(args.id).exists() or bindings.path(args.id).is_symlink()):
+            bound = bindings.load(args.id)
+            doc = account_lifecycle.load(bindings, args.id)
+            if doc["phase"] == "deleted":
+                raise Error("not_found", "This agent was removed from management. Private state and its binding are retained.")
+            if doc["phase"] != "ready" and not (args.operation == "delete" and doc["phase"] in {"deleting", "unit_removed"}):
+                raise Error("account_incomplete", "The dedicated-account lifecycle is incomplete. Retry the original create/delete command.")
+            return account_lifecycle.Lifecycle(store, bound).execute(args, doc)
     supervisor = Systemd(store, args.unit_dir)
     guided = None
     if args.operation == "create" and not args.config:
@@ -173,8 +251,10 @@ def execute(args):
             return {"goose_path": str(Path(goose).resolve()), "systemd_user": "verified", "buzz_acp_interface": "verified", "openssl_secp256k1": "verified", "live_buzz_tested": False,
                     "provider": "Checked for each agent during create/start; no provider or relay contacted by doctor."}
         if args.operation == "list":
-            return {"agents": [view(store, supervisor, store.load(ident)) for ident in store.ids()]}
+            return {"agents": separate + [view(store, supervisor, store.load(ident)) for ident in store.ids()]}
         if args.operation == "create":
+            if bindings.path(args.id).exists() or bindings.path(args.id).is_symlink():
+                raise Error("already_exists", "This ID is reserved by a dedicated-account binding.")
             directory = store.directory(args.id)
             if directory.exists() or directory.is_symlink():
                 raise Error("already_exists", "This ID already has managed or retained data. Choose another ID; delete retains private data and identity.")
@@ -243,7 +323,7 @@ def execute(args):
         raise Error("usage", "Unknown operation. Run buzz-server --help.")
 
 
-def guided_create(ident, directory, root):
+def guided_create(ident, directory, root, dedicated=None):
     """Collect choices only; all validation and confirmation precede agent state."""
     from .runtime import tool
 
@@ -266,12 +346,15 @@ def guided_create(ident, directory, root):
         raise Error("invalid_config", "System prompt must be UTF-8 text of at most 64 KiB.")
     c = {"relay_url": relay, "owner": owner, "profile": {"name": name, "about": about, "avatar": avatar},
          "prompt_file": str(directory / "user-prompt.txt"), "provider": {"kind": "goose-managed"},
-         "harness": {"kind": "goose", "command": tool("goose", root)}}
+         "harness": {"kind": "goose", "command": str(Path(root) / "tools/bin/goose") if dedicated else tool("goose", root)}}
     config.validate(c)
     config.validate_relay_transport(relay)
     if not config.text(prompt, 65536, True):
         raise Error("invalid_config", "System prompt contains invalid characters.")
-    print("The agent will be created stopped under the current Linux account. Configure provider credentials later with inference configure.")
+    if dedicated:
+        print(f"The agent will be created stopped as {dedicated.account} (UID {dedicated.uid}). Authorize fixed system tools through ordinary sudo; the agent receives no management CLI or sudo grant.")
+    else:
+        print("The agent will be created stopped under the current Linux account. Configure provider credentials later with inference configure.")
     if ask("Create agent? Enter yes to confirm", "no").lower() != "yes":
         raise Error("creation_cancelled", "Creation discarded; no agent was created.")
     return c, prompt
@@ -293,7 +376,7 @@ def account_plan(name):
     if account.pw_uid == 0 or account.pw_uid == os.getuid():
         raise Error("invalid_account", "Choose a pre-existing, dedicated unprivileged account distinct from the operator.")
     return {"account": name, "uid": account.pw_uid, "changes_applied": False,
-            "procedure": "docs/service-accounts.md", "authorization_required": "Host administrator must explicitly authorize account-scoped CLI execution and user-manager persistence. No blanket sudo or account creation/deletion."}
+            "procedure": "docs/service-accounts.md", "authorization_required": "The operator must explicitly authorize fixed system-unit tools and target-UID operations through ordinary sudo. No account creation/deletion, permission grant or linger change."}
 
 
 def render(operation, data):
