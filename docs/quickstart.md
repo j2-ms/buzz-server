@@ -49,14 +49,18 @@ provider readiness.
 
 ### Custom OpenAI-compatible endpoint
 
-In the Goose wizard, choose **Custom Providers** → **Add A Custom Provider** →
-**OpenAI Compatible**. Give the provider a display name and enter its full API
-base URL (for example, `https://models.example.com/v1`). Answer the authentication
-and streaming prompts according to your provider, enter the model ID under
-**Available models**, and choose it as the default. Leave **API base path** blank
-for a standard `/v1/chat/completions` endpoint and skip custom headers unless
-your provider requires them. Do not append `/chat/completions` to the API URL.
-You do not need the built-in OpenAI provider's advanced settings for this route.
+On first run, choose **Manual Configuration** → **Search all providers…**.
+Search for `OpenAI` and select **OpenAI** (described as “OpenAI models, including
+OpenAI compatible ones”). The **Custom Providers** menu is not available on a
+fresh Goose profile.
+
+Enter the endpoint's API key when prompted for `OPENAI_API_KEY`; skip it only if
+your endpoint does not require authentication. Answer **Yes** to advanced
+settings. Set `OPENAI_BASE_URL` to the full API base URL (for example,
+`https://models.example.com/v1`, without `/chat/completions`). Accept the
+`OPENAI_HOST` default and leave `OPENAI_BASE_PATH` blank; the explicit base URL
+takes precedence. Skip organization, project and header settings unless your
+provider requires them. Select your model and finish the wizard.
 
 ### First reply
 
