@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 REPO = 'repos/j2-ms/buzz-server'
 ASSET = 'buzz-server.pyz'
 MAX_SIZE = 8 * 1024 * 1024
