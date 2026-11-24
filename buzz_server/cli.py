@@ -178,7 +178,7 @@ def execute(args):
             else:
                 doc = {"version": 1, "id": args.id, "phase": "creating", "identity": None,
                        "revision": 1, "desired": "stopped"}
-            lifecycle = account_lifecycle.Lifecycle(store, bound)
+            lifecycle = account_lifecycle.Lifecycle(store, bound, interactive=not args.json)
             lifecycle.save(doc)
             return lifecycle.create(doc, args.config, prepared=dedicated_guided, structured=args.json)
         if args.operation == "list":
@@ -205,7 +205,7 @@ def execute(args):
                 raise Error("not_found", "This agent was removed from management. Private state and its binding are retained.")
             if doc["phase"] != "ready" and not (args.operation == "delete" and doc["phase"] in {"deleting", "unit_removed"}):
                 raise Error("account_incomplete", "The dedicated-account lifecycle is incomplete. Retry the original create/delete command.")
-            return account_lifecycle.Lifecycle(store, bound).execute(args, doc)
+            return account_lifecycle.Lifecycle(store, bound, interactive=not args.json).execute(args, doc)
     supervisor = Systemd(store, args.unit_dir)
     guided = None
     if args.operation == "create" and not args.config:

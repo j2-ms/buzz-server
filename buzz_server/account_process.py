@@ -7,7 +7,7 @@ import tempfile
 import time
 
 
-def run(argv, *, env, cwd, umask, input=None, stdin=None, capture_output=True, timeout=30):
+def run(argv, *, env, cwd, umask, input=None, stdin=None, capture_output=True, timeout: float | None = 30):
     child = None
     previous_term = signal.getsignal(signal.SIGTERM)
     source = None
@@ -29,6 +29,8 @@ def run(argv, *, env, cwd, umask, input=None, stdin=None, capture_output=True, t
                                  env=env, cwd=cwd, umask=umask)
         output = bytearray()
         if capture_output:
+            if timeout is None:
+                raise ValueError("captured commands require a deadline")
             deadline = time.monotonic() + timeout
             with selectors.DefaultSelector() as selector:
                 selector.register(child.stdout, selectors.EVENT_READ)

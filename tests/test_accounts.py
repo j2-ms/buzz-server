@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -110,7 +111,7 @@ class AccountTests(unittest.TestCase):
         command = Commands(self.bindings, binding)
         command.control("stop")
         args, kwargs = self.run.call_args
-        self.assertEqual(args[0], ["/usr/bin/sudo", "--", "/usr/bin/systemctl", "--system", "stop", binding.service])
+        self.assertEqual(args[0], ["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/systemctl", "--system", "stop", binding.service])
         self.assertEqual(kwargs["env"], CLEAN_ENV)
         self.assertEqual(kwargs["cwd"], "/")
         self.assertEqual(kwargs["umask"], 0o077)
@@ -119,11 +120,94 @@ class AccountTests(unittest.TestCase):
                 command.control(operation)
         self.assertEqual(self.run.call_count, 1)
 
+    def test_separate_authentication_wait_then_bounded_effects(self):
+        binding = self.reserve()
+        command = Commands(self.bindings, binding, interactive=True)
+        with patch("buzz_server.account_commands.sys.stdin.isatty", return_value=True), \
+             patch("buzz_server.account_commands.sys.stdout.isatty", return_value=True), \
+             patch("buzz_server.account_commands.sys.stderr.isatty", return_value=True):
+            command.authenticate()
+            command.target("pass", input=b"private fixture")
+            command.control("stop")
+        self.assertEqual(self.run.call_count, 3)
+        auth, target, control = self.run.call_args_list
+        self.assertEqual(auth.args[0], ["/usr/bin/sudo", "--validate"])
+        self.assertIsNone(auth.kwargs["timeout"])
+        self.assertFalse(auth.kwargs["capture_output"])
+        self.assertEqual(auth.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIsNone(auth.kwargs["input"])
+        self.assertEqual(target.kwargs["timeout"], 60)
+        self.assertEqual(target.kwargs["input"], b"private fixture")
+        self.assertTrue(target.kwargs["capture_output"])
+        self.assertEqual(control.kwargs["timeout"], 30)
+        self.assertEqual(control.kwargs["stdin"], subprocess.DEVNULL)
+        for call in (auth, target, control):
+            self.assertEqual(call.kwargs["env"], CLEAN_ENV)
+            self.assertEqual(call.kwargs["cwd"], "/")
+            self.assertEqual(call.kwargs["umask"], 0o077)
+
+    def test_failed_authentication_never_runs_effect(self):
+        binding = self.reserve()
+        for failure in (SimpleNamespace(returncode=1, stdout=b""), OSError(), KeyboardInterrupt()):
+            self.run.reset_mock()
+            self.run.side_effect = [failure]
+            with patch("buzz_server.account_commands.sys.stdin.isatty", return_value=True), \
+                 patch("buzz_server.account_commands.sys.stdout.isatty", return_value=True), \
+                 patch("buzz_server.account_commands.sys.stderr.isatty", return_value=True):
+                with self.assertRaises((Error, KeyboardInterrupt)):
+                    Commands(self.bindings, binding, interactive=True).authenticate()
+            self.assertEqual(self.run.call_count, 1)
+            self.assertEqual(self.run.call_args.args[0], ["/usr/bin/sudo", "--validate"])
+
+    def test_binding_revalidated_after_authentication_wait(self):
+        binding = self.reserve()
+        def remap(*args, **kwargs):
+            self.lookup.return_value = SimpleNamespace(**{**self.entry.__dict__, "pw_uid": self.entry.pw_uid + 1})
+            return SimpleNamespace(returncode=0, stdout=b"")
+        self.run.side_effect = remap
+        with patch("buzz_server.account_commands.sys.stdin.isatty", return_value=True), \
+             patch("buzz_server.account_commands.sys.stdout.isatty", return_value=True), \
+             patch("buzz_server.account_commands.sys.stderr.isatty", return_value=True):
+            with self.assertRaises(Error):
+                Commands(self.bindings, binding, interactive=True).authenticate()
+        self.assertEqual(self.run.call_count, 1)
+
+    def test_no_auth_prompt_without_all_terminals_or_explicit_permission(self):
+        binding = self.reserve()
+        for interactive, terminals in ((False, (True, True, True)), (True, (False, True, True)),
+                                       (True, (True, False, True)), (True, (True, True, False))):
+            self.run.reset_mock()
+            with patch("buzz_server.account_commands.sys.stdin.isatty", return_value=terminals[0]), \
+                 patch("buzz_server.account_commands.sys.stdout.isatty", return_value=terminals[1]), \
+                 patch("buzz_server.account_commands.sys.stderr.isatty", return_value=terminals[2]):
+                command = Commands(self.bindings, binding, interactive=interactive)
+                command.authenticate()
+                command.control("stop")
+            self.assertEqual(self.run.call_count, 1)
+            self.assertEqual(self.run.call_args.args[0][1], "--non-interactive")
+
+    def test_read_only_show_skips_auth_and_terminal_target_keeps_forwarding(self):
+        binding = self.reserve()
+        command = Commands(self.bindings, binding, interactive=True)
+        with patch("buzz_server.account_commands.sys.stdin.isatty", return_value=True), \
+             patch("buzz_server.account_commands.sys.stdout.isatty", return_value=True), \
+             patch("buzz_server.account_commands.sys.stderr.isatty", return_value=True):
+            command.show(["User"])
+            self.assertEqual(self.run.call_count, 1)
+            self.assertEqual(self.run.call_args.args[0][0], "/usr/bin/systemctl")
+            self.assertEqual(self.run.call_args.kwargs["timeout"], 30)
+            command.authenticate()
+            command.target("pass", terminal=True)
+        self.assertEqual(self.run.call_count, 3)
+        self.assertIsNone(self.run.call_args.kwargs["timeout"])
+        self.assertFalse(self.run.call_args.kwargs["capture_output"])
+        self.assertIsNone(self.run.call_args.kwargs["stdin"])
+
     def test_target_python_runs_only_after_numeric_uid_transition(self):
         binding = self.reserve()
         Commands(self.bindings, binding).target("pass", input=b"synthetic")
         args, kwargs = self.run.call_args
-        self.assertEqual(args[0], ["/usr/bin/sudo", "--user=#" + str(binding.uid),
+        self.assertEqual(args[0], ["/usr/bin/sudo", "--non-interactive", "--user=#" + str(binding.uid),
                                   "--group=#" + str(binding.gid), "--", "/usr/bin/env", "-i",
                                   "PATH=/usr/bin:/bin", "LANG=C.UTF-8", "HOME=/home/fixture",
                                   "/usr/bin/python3", "-I", "-c", "pass"])

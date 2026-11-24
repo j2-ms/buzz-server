@@ -44,8 +44,12 @@ shown defaults. Ctrl+C, Ctrl+D or declining confirmation discards the choices.
 Authorize fixed system tools through ordinary sudo when requested; do not run
 the CLI itself as root or install it under the agent account. Goose setup runs
 at the target UID with that agent's private HOME, not the operator's settings.
-It does not grant the agent sudo. Goose exiting successfully does not prove
-provider readiness.
+It does not grant the agent sudo. Choose Goose's mode explicitly: auto executes
+enabled tools without per-call approval, so use it only for an account and
+workspace whose permissions you authorize. Modes that ask at runtime can block
+unattended responses. A cancelled wizard may exit successfully without readiness;
+rerun `buzz-server inference configure assistant` and finish setup before starting.
+Prove readiness with the [First reply](#first-reply) check below.
 
 ### Custom OpenAI-compatible endpoint
 

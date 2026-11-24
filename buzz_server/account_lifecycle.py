@@ -68,10 +68,10 @@ def require_detached(store):
 
 
 class Lifecycle:
-    def __init__(self, store, binding):
+    def __init__(self, store, binding, *, interactive=False):
         self.bindings = Bindings(store)
         self.binding = binding
-        self.commands = Commands(self.bindings, binding)
+        self.commands = Commands(self.bindings, binding, interactive=interactive)
         self.supervisor = AccountSystemd(self.commands)
 
     def save(self, doc):
@@ -156,6 +156,7 @@ class Lifecycle:
                     with files[name].open("rb") as source:
                         shutil.copyfileobj(source, stream, 65536)
                 stream.seek(0)
+                self.commands.authenticate()
                 self.target("install", stdin=stream)
         return acquired_names
 
@@ -227,12 +228,15 @@ class Lifecycle:
         if op in {"show", "status"}:
             return self.view(doc)
         if op == "start":
+            self.commands.authenticate()
             return self.start(doc)
         if op == "stop":
+            self.commands.authenticate()
             self.stop(doc)
             return self.view(doc)
         if op == "configure":
             config.load(args.config)
+            self.commands.authenticate()
             running = doc["desired"] == "running"
             self.stop(doc)
             doc["revision"] += 1
@@ -240,11 +244,15 @@ class Lifecycle:
             self.apply(doc, args.config)
             return self.start(doc) if running else self.view(doc)
         if op == "inference":
-            if doc["desired"] != "stopped" or not self.supervisor.stopped():
+            if doc["desired"] != "stopped":
+                raise Error("stop_required", "Explicitly stop and verify this system unit before Goose setup.")
+            self.commands.authenticate()
+            if not self.supervisor.stopped():
                 raise Error("stop_required", "Explicitly stop and verify this system unit before Goose setup.")
             self.target("inference", {"identity": doc["identity"]}, terminal=True)
             return {"id": doc["id"], "setup_exited": True, "buzz_response_verified": False}
         if op == "delete":
+            self.commands.authenticate()
             if doc["phase"] != "unit_removed":
                 doc["phase"] = "deleting"
                 doc["desired"] = "stopped"

@@ -70,6 +70,14 @@ class DedicatedCliTests(unittest.TestCase):
     def system_run(self, argv, **kwargs):
         from types import SimpleNamespace
         output = b""
+        if argv == ["/usr/bin/sudo", "--validate"]:
+            self.assertIsNone(kwargs["timeout"])
+            self.assertFalse(kwargs["capture_output"])
+            self.assertIsNone(kwargs["input"])
+            return SimpleNamespace(returncode=0, stdout=b"")
+        if argv[0] == "/usr/bin/sudo":
+            self.assertEqual(argv[1], "--non-interactive")
+            argv = [argv[0], *argv[2:]]
         if argv[:2] == ["/usr/bin/systemctl", "--system"]:
             output = self.model.show(AccountSystemd.PROPERTIES) if self.model else b"LoadState=not-found\nDropInPaths=\nFragmentPath=\nActiveState=inactive\nMainPID=0\nControlGroup=\n"
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/systemctl"]:
@@ -157,6 +165,41 @@ class DedicatedCliTests(unittest.TestCase):
     def create(self):
         return self.call("create", "assistant", "--account", "fixture", "--config", str(self.config))
 
+    def test_json_on_terminal_never_validates_and_sudo_failure_stays_structured(self):
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("sys.stdout.isatty", return_value=True), \
+             patch("sys.stderr.isatty", return_value=True):
+            self.create()
+            self.assertNotIn(["/usr/bin/sudo", "--validate"],
+                             [call.args[0] for call in self.run.call_args_list])
+            self.run.reset_mock()
+            original = self.system_run
+            def denied(argv, **kwargs):
+                if argv[0] == "/usr/bin/sudo":
+                    self.assertEqual(argv[1], "--non-interactive")
+                    return SimpleNamespace(returncode=1, stdout=b"")
+                return original(argv, **kwargs)
+            self.run.side_effect = denied
+            error = self.call("start", "assistant", success=False)
+        self.assertEqual(error["code"], "account_command_failed")
+        self.assertFalse(self.model.active)
+
+    def test_inference_checks_stopped_state_after_authentication(self):
+        self.create()
+        self.requests.clear()
+        self.run.reset_mock()
+
+        def started_while_waiting(argv, **kwargs):
+            if argv == ["/usr/bin/sudo", "--validate"]:
+                self.model.active = True
+            return self.system_run(argv, **kwargs)
+
+        self.run.side_effect = started_while_waiting
+        with patch("sys.stdin.isatty", return_value=True):
+            self.call("inference", "configure", "assistant", structured=False, success=False)
+        self.assertEqual(self.run.call_args_list[0].args[0], ["/usr/bin/sudo", "--validate"])
+        self.assertFalse(self.requests)
+
     def test_guided_dedicated_create_collects_without_mutation_lock_and_paths(self):
         answers = ["", "", "", "ab" * 32, "wss://relay.example.test", "SYNTHETIC-PRIVATE-PROMPT", "yes"]
         def answer(_):
@@ -232,7 +275,7 @@ class DedicatedCliTests(unittest.TestCase):
         for response in ({"applied": 1}, {"applied": True, "unit": "sshd.service", "operation": "start"}):
             def forged(argv, **kwargs):
                 result = original(argv, **kwargs)
-                if argv[0] == "/usr/bin/sudo" and argv[1].startswith("--user="):
+                if argv[0] == "/usr/bin/sudo" and argv[1:2] == ["--non-interactive"] and argv[2].startswith("--user="):
                     result.stdout = json.dumps(response).encode()
                 return result
             self.run.side_effect = forged
@@ -327,7 +370,7 @@ class DedicatedCliTests(unittest.TestCase):
     def test_interrupted_create_retries_owned_stage_without_redownload(self):
         original = self.system_run
         def fail_publish(argv, **kwargs):
-            if argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/ln"]:
+            if argv[:4] == ["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/ln"]:
                 raise OSError("synthetic interrupted publication")
             return original(argv, **kwargs)
         self.run.side_effect = fail_publish

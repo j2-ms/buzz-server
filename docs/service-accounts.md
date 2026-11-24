@@ -16,6 +16,36 @@ operations. Buzz Server installs no sudo policy or permission grant. It never
 creates or retires accounts, configures login access, enables linger, or changes
 a relay. No target login or user manager is required.
 
+For an interactive command (stdin, stdout and stderr all terminals, without
+`--json`), Buzz Server runs fixed `/usr/bin/sudo --validate` once before its first
+sudo effect. Authentication uses the operator's existing policy and controlling
+TTY; its human wait is separate from command deadlines. It holds the existing
+mutation/installation locks during this wait and child cleanup; cancel with
+Ctrl+C rather than killing the CLI. The CLI rechecks the binding after
+authentication and makes its service safety checks after that wait. Effects
+always use `sudo --non-interactive`: fixed system tools retain their 30-second
+deadline and target operations 60 seconds.
+Interactive Goose setup retains direct terminal forwarding and no wizard deadline.
+
+JSON and non-TTY calls never run interactive validation. They require existing
+passwordless authorization for the exact effects or a usable cached timestamp.
+For recovery, from the same operator terminal run `/usr/bin/sudo --validate`,
+then retry the original command (including `--json` for automation). A cache
+must apply to the later sudo process and its execution identity under local
+policy. If validation is cancelled or fails, no privileged effect follows it.
+If the cache expires between effects, the next effect fails without prompting; retained
+state/journals support retry. A policy such as `timestamp_timeout=0`, or a
+process-scoped timestamp that cannot be reused, may prevent this split from
+working even after successful validation. Existing exact-effect NOPASSWD grants
+can still support noninteractive/JSON operation; interactive validation itself
+may require authentication under local policy. The Goose wizard cannot use the
+JSON/non-TTY fallback: its interactive validation must succeed too. If neither a
+reusable timestamp nor existing passwordless authorization is available, the
+dedicated-account route is unsupported.
+Do not pipe passwords, run the CLI as root, or add/relax grants to work around it.
+Doctor, account-plan, status/show/list and uninstall's system-manager removal
+proof remain read-only and do not request sudo validation.
+
 Run `buzz-server doctor --account ACCOUNT` from the operator login to check the
 account layout and reachability of the system manager without sudo. It does not
 verify the account's effective administrative permissions; the host administrator
