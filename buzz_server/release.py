@@ -203,6 +203,37 @@ def locked(prefix, *, shared=False, fresh=False, wait=10):
         os.close(fd)
 
 
+def user_command(prefix, *, installing=False):
+    """Return the managed standard command; never follow or replace a foreign one."""
+    home = Path.home().absolute()
+    if prefix != home / '.local/buzz-server-cli':
+        return None
+    for directory in (home, home / '.local', home / '.local/bin'):
+        if installing and not directory.exists() and not directory.is_symlink():
+            directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            if not installing:
+                return None
+            raise
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+                stat.S_IMODE(info.st_mode) & 0o022):
+            if not installing:
+                return None
+            raise Error('release_refused', 'The standard user bin path must be owned by you, be a real directory and not be group- or world-writable.')
+    command = home / '.local/bin/buzz-server'
+    try:
+        info = command.lstat()
+    except FileNotFoundError:
+        return command if installing else None
+    if not stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid() or os.readlink(command) != str(prefix / 'bin/buzz-server'):
+        if not installing:
+            return None
+        raise Error('release_refused', 'The standard user command already exists and is not this installation’s managed link; move it aside and retry.')
+    return command
+
+
 def _install(artifact, prefix, state, units):
     number, digest, data = inspect_artifact(artifact)
     state, units = str(Path(state).absolute()), str(Path(units).absolute())
@@ -223,11 +254,16 @@ def _install(artifact, prefix, state, units):
     for p in (Path(state), Path(units)):
         if p == prefix or prefix in p.parents or p in prefix.parents:
             denied()
+    command = user_command(prefix, installing=True)
     name = number + '-' + digest
     payload = prefix / 'payloads' / name
     old = dict(m, payloads=list(m['payloads']))
     created = name not in m['payloads']
+    command_created = False
     try:
+        if command is not None and not command.is_symlink():
+            command.symlink_to(prefix / 'bin/buzz-server')
+            command_created = True
         if created:
             private_dir(prefix / 'payloads')
             private_dir(payload)
@@ -252,6 +288,8 @@ def _install(artifact, prefix, state, units):
         link.symlink_to('payloads/' + name)
         os.replace(link, prefix / 'active')
     except Exception:
+        if command_created and command.is_symlink() and os.readlink(command) == str(prefix / 'bin/buzz-server'):
+            command.unlink()
         (prefix / '.activate').unlink(missing_ok=True)
         if existing:
             write_json(prefix / 'installation.json', old)
@@ -275,6 +313,9 @@ def install(artifact, prefix, state, units):
     for p in (Path(state).absolute(), Path(units).absolute()):
         if p == prefix or prefix in p.parents or p in prefix.parents:
             denied()
+    # Create the standard parent with a safe mode even under a permissive umask.
+    if prefix == Path.home().absolute() / ".local/buzz-server-cli":
+        user_command(prefix, installing=True)
     with locked(prefix, fresh=True) as prefix:
         return _install(artifact, prefix, state, units)
 
@@ -286,6 +327,8 @@ def uninstall(prefix):
         store = Store(m['state'])
         supervisor = Systemd(store, m['units'])
         with store.lock():
+            from .account_lifecycle import require_detached
+            require_detached(store)
             units = Path(m['units'])
             paths = list(units.glob('buzz-server-*.service')) if units.exists() else []
             docs = {ident: store.load(ident) for ident in store.ids()}
@@ -310,6 +353,8 @@ def uninstall(prefix):
             for ident in sorted(unit_ids):
                 supervisor.remove(ident)
             # Stop + disable + cgroup verification happen in Systemd.stop/remove.
+            if (command := user_command(prefix)) is not None:
+                command.unlink()
             (prefix / '.activate').unlink(missing_ok=True)
             (prefix / 'active').unlink(missing_ok=True)
             (prefix / 'bin/buzz-server').unlink(missing_ok=True)

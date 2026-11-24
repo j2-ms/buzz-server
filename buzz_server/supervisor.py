@@ -9,6 +9,10 @@ from .errors import Error
 from .storage import atomic, private_dir, read_private
 
 
+class PreexistingUnit(Error):
+    """A create conflict detected before writing a unit."""
+
+
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
@@ -107,7 +111,7 @@ class Systemd:
         content = self.content(ident)
         if path.exists() or path.is_symlink():
             if new:
-                raise Error("unit_conflict", "A unit file with this agent ID already exists. Choose another ID.")
+                raise PreexistingUnit("unit_conflict", "A unit file with this agent ID already exists. Choose another ID.")
             saved = self.read_owned(ident)
             state = self.inspect(ident)
             if saved != content:
@@ -117,7 +121,7 @@ class Systemd:
         else:
             existing = self.inspect(ident, missing=True)
             if existing.get("LoadState") != "not-found":
-                raise Error("unit_conflict", "A unit with this agent ID is already loaded. Choose another ID.")
+                raise PreexistingUnit("unit_conflict", "A unit with this agent ID is already loaded. Choose another ID.")
             atomic(path, content, allow_readable_parent=True)
         self.call("daemon-reload")
         self.read_owned(ident)

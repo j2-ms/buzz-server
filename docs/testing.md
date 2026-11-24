@@ -2,6 +2,37 @@
 
 Run the unit tests as described in [Contributing](../CONTRIBUTING.md#develop-and-verify).
 
+## Dedicated-account offline checks
+
+`test_account_cli.py` drives the operator CLI through guided/scripted creation,
+installed-CLI lifecycle, reconfiguration, interactive setup routing and deletion.
+NSS, system tools and the system manager are synthetic. Checks include collection
+outside mutation locks, remap/collision rejection at commit, reuse of owned private
+tools, secret-free argv, typed target acknowledgments, retry after interrupted
+publication, and uninstall refusal under both exclusive locks. A dedicated doctor
+check needs no operator user manager. Same-account tests remain separate.
+
+`test_accounts.py` checks binding corruption/remapping and fixed UID/argv/env.
+It also rejects operator unit-source paths replaceable through untrusted ancestors.
+`test_account_supervisor.py` checks effective-unit mismatches, staged publication,
+typed retry journals, cgroup refusal and interrupted removal. The synthetic manager
+models omitted empty hook and environment-file lists from `systemctl show --all`
+on systemd 255; missing required fields and nonempty hooks still fail closed. It
+also models a missing fragment that still has live or unknown process state;
+retry must verify stopped state and empty cgroup before its reload or deletion.
+These fixtures do not establish real systemd serialization or sudo behavior.
+`test_account_target.py` executes file operations and synthetic tool scripts only
+inside private scratch directories at the unprivileged test UID, with synthetic
+NSS. It verifies permissions, identity/private-state retention, interrupted staging
+and refusal to truncate an unrelated hardlink. `test_worker_payload.py` assembles
+the worker from an actual local release zipapp, checks the exact module allowlist,
+and executes its real stopped-worker entry without operator source access.
+
+These tests do not run sudo, change real accounts/services, fetch dependencies or
+contact providers/relays. A real disposable dedicated-account lifecycle and a
+signed Buzz reply require separate verification. Persistent unit configuration
+is not evidence of unattended reboot behavior.
+
 ## Disposable lifecycle test
 
 Use an isolated Linux environment with Python 3.12+, OpenSSL, `dbus-daemon`, and systemd with cgroup v2. Install trusted `buzz` and `buzz-acp` binaries in `/usr/bin` or `/usr/local/bin` and run as an unprivileged user:

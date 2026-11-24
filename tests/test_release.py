@@ -46,6 +46,38 @@ class ReleaseTests(unittest.TestCase):
     def install(self, artifact=None):
         return release.install(artifact or self.a, self.prefix, self.state, self.units)
 
+    def test_default_user_command_lifecycle_and_collision(self):
+        home = self.base / 'home'
+        home.mkdir(mode=0o700)
+        prefix = home / '.local/buzz-server-cli'
+        command = home / '.local/bin/buzz-server'
+        env = dict(os.environ, HOME=str(home), PATH=str(home / '.local/bin') + ':/usr/bin:/bin')
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            absent = subprocess.run(['/bin/sh', '-c', 'command -v buzz-server'], env=env, capture_output=True)
+            self.assertNotEqual(absent.returncode, 0)
+            release.install(self.a, prefix, self.state, self.units)
+            self.assertEqual(os.readlink(command), str(prefix / 'bin/buzz-server'))
+            self.assertEqual((prefix / 'bin/buzz-server').stat().st_mode & 0o777, 0o700)
+            self.assertEqual((prefix / 'active/app.pyz').stat().st_mode & 0o777, 0o600)
+            result = subprocess.run(['/bin/sh', '-c', 'buzz-server --version'], env=env, capture_output=True, timeout=5)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, b'1.0.0'))
+            release.install(self.b, prefix, self.state, self.units)
+            result = subprocess.run(['/bin/sh', '-c', 'buzz-server --version'], env=env, capture_output=True, timeout=5)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, b'1.2.0'))
+            release.uninstall(prefix)
+            self.assertFalse(command.is_symlink())
+            command.write_text('unrelated')
+            with self.assertRaises(Error):
+                release.install(self.a, prefix, self.state, self.units)
+            self.assertEqual(command.read_text(), 'unrelated')
+            command.unlink()
+            release.install(self.a, prefix, self.state, self.units)
+            command.unlink()
+            command.write_text('another command replaced the managed link')
+            release.uninstall(prefix)
+            self.assertEqual(command.read_text(), 'another command replaced the managed link')
+            self.assertFalse((prefix / 'bin/buzz-server').exists())
+
     def test_fresh_install_enables_interactive_offers(self):
         self.assertTrue(self.install()['auto_update'])
 
@@ -234,16 +266,16 @@ class ReleaseTests(unittest.TestCase):
                          {'buzz': '/usr/bin/buzz', 'buzz-acp': None, 'goose': None})
         run.assert_not_called()
 
-    def test_install_guidance_shows_goose_path_and_next_step(self):
+    def test_install_guidance_shows_next_step_without_manual_goose_path(self):
         from buzz_server import cli
         data = dict(version='1.0.0', prefix=str(self.prefix), missing_runtime_tools=['buzz'],
                     runtime_tool_paths={'buzz': None, 'buzz-acp': '/usr/bin/buzz-acp', 'goose': '/usr/local/bin/goose'})
         text = cli.render('install', data)
-        self.assertIn('/usr/local/bin/goose', text)
-        self.assertIn('harness.command', text)
+        self.assertNotIn('/usr/local/bin/goose', text)
+        self.assertNotIn('harness.command', text)
         self.assertIn('https://github.com/block/buzz/releases/tag/desktop-v0.5.30', text)
-        self.assertIn('doctor', text)
-        self.assertIn('buzz-server update does not update privately installed runtime tools', text)
+        self.assertIn('buzz-server doctor', text)
+        self.assertIn('custom prefix', text)
 
     def offer(self, answer='yes\n', **kwargs):
         if os.getuid() == 0:

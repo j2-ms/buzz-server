@@ -1,13 +1,19 @@
 """Independent bootstrap tests; only synthetic local GitHub responses."""
 import copy
+import errno
 import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import pty
+import select
+import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +36,16 @@ class BootstrapTests(unittest.TestCase):
         self.metadata = dict(tag_name='v1.0.0', draft=False, prerelease=False, assets=[dict(
             name='buzz-server.pyz', id=42, size=len(self.data),
             digest='sha256:' + hashlib.sha256(self.data).hexdigest())])
+
+    def test_packaged_create_without_terminal_refuses_without_state(self):
+        state = self.base / 'state'
+        p = subprocess.run(['/usr/bin/python3', str(self.artifact), '--json', '--state-dir', str(state),
+                            'create', 'agent'], input=b'', capture_output=True, timeout=5)
+        self.assertEqual(p.returncode, 1)
+        response = json.loads(p.stderr)
+        self.assertEqual(response['error']['code'], 'interactive_required')
+        self.assertEqual(p.stdout, b'')
+        self.assertFalse(state.exists())
 
     def test_contract_matches_updater(self):
         self.assertEqual(bootstrap.candidate(self.metadata), release.candidate(self.metadata, '0.0.0'))
@@ -153,6 +169,104 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual(command[:2], ['/usr/bin/python3', '-I'])
                 self.assertEqual(run.call_args.kwargs['stdin'], None if tty and not structured else subprocess.DEVNULL)
                 self.assertNotIn('HTTPS_PROXY', run.call_args.kwargs['env'])
+
+    def test_piped_input_reopens_controlling_terminal(self):
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        def open_terminal(path, mode):
+            self.assertEqual((path, mode), ('/dev/tty', 'r'))
+            return os.fdopen(os.dup(slave), mode)
+        args = bootstrap.parser().parse_args([])
+        with (patch.object(bootstrap.sys.stdin, 'isatty', return_value=False),
+              patch.object(bootstrap.sys.stdout, 'isatty', return_value=True),
+              patch.object(bootstrap.sys.stderr, 'isatty', return_value=True),
+              patch('builtins.open', side_effect=open_terminal)):
+            with bootstrap.terminal(args) as (stream, interactive):
+                self.assertTrue(interactive)
+                self.assertTrue(os.isatty(stream.fileno()))
+
+    def test_bootstrap_pipe_preserves_real_terminal_consent(self):
+        source = self.base / 'source'
+        shutil.copytree(SOURCE / 'buzz_server', source / 'buzz_server')
+        shutil.copy2(SOURCE / 'entry.py', source / 'entry.py')
+        # Keep installation, terminal handling and dependency consent real. Only
+        # acquisition/platform checks are fixture-backed (no external requests).
+        with (source / 'buzz_server/dependencies.py').open('a') as file:
+            file.write('''
+def resolve(name, root=None):
+    if root is not None and (bin_dir(root) / name).exists():
+        return str(bin_dir(root) / name)
+    return None
+
+def supported():
+    pass
+
+def acquire(package, directory):
+    for name, _ in package['members'].values():
+        binary = directory / name
+        binary.write_bytes(b'#!/bin/sh\\nexit 0\\n')
+        binary.chmod(0o700)
+''')
+        release.build(source, self.artifact, '1.0.0')
+        data = self.artifact.read_bytes()
+        fixture_metadata = dict(tag_name='v1.0.0', draft=False, prerelease=False, assets=[dict(
+            name=bootstrap.ASSET, id=42, size=len(data), digest='sha256:' + hashlib.sha256(data).hexdigest())])
+        metadata = self.base / 'metadata.json'
+        metadata.write_text(json.dumps(fixture_metadata))
+        script = self.base / 'installer.py'
+        original = (SOURCE / 'scripts/bootstrap.py').read_text()
+        prefix, separator, tail = original.partition("if __name__ == '__main__':")
+        self.assertTrue(separator)
+        script.write_text(prefix + '\ndef fetch(url, target, limit):\n'
+                          + f'    path = {str(metadata)!r} if url == API_URL else {str(self.artifact)!r}\n'
+                          + '    target.write_bytes(Path(path).read_bytes())\n\n' + separator + tail)
+        for response, downloads in ((b'\n', True), (b'no\n', False)):
+            with self.subTest(downloads=downloads):
+                home = self.base / ('accept' if downloads else 'decline')
+                home.mkdir(mode=0o700)
+                child, master = pty.fork()
+                if child == 0:
+                    os.chdir(home)
+                    os.execve('/bin/bash', ['bash', '-o', 'pipefail', '-c',
+                                             '/bin/cat "$1" | /usr/bin/python3 -I -', 'bash', str(script)],
+                              {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
+                reaped = False
+                output = b''
+                sent = False
+                try:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        if select.select([master], [], [], .1)[0]:
+                            try:
+                                part = os.read(master, 16384)
+                            except OSError as exc:
+                                if exc.errno != errno.EIO:
+                                    raise
+                                part = b''
+                            output += part
+                            if not sent and b'Install missing tools? [Y/n]' in output:
+                                os.write(master, response)
+                                sent = True
+                        pid, status = os.waitpid(child, os.WNOHANG)
+                        if pid:
+                            reaped = True
+                            self.assertEqual(os.waitstatus_to_exitcode(status), 0, output)
+                            break
+                    self.assertTrue(reaped and sent, output)
+                finally:
+                    if not reaped:
+                        try:
+                            os.killpg(child, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        os.waitpid(child, 0)
+                    os.close(master)
+                command = home / '.local/bin/buzz-server'
+                self.assertTrue(command.is_symlink())
+                tools = home / '.local/share/buzz-server/tools/bin'
+                self.assertEqual({p.name for p in tools.glob('*')},
+                                 {'buzz', 'buzz-acp', 'goose'} if downloads else set())
 
     def test_interactive_consent_has_no_parent_deadline(self):
         def fetch(args, target, limit):
