@@ -1,28 +1,28 @@
 # Ubiquitous Language
 
-Diese Begriffe meinen in Oberfläche, Dokumentation und Implementierung dasselbe. Englische Bezeichnungen lehnen sich an **Create Agent** an; die endgültigen UI-Labels sind offen.
+These terms mean the same thing in the interface, the documentation and the implementation. The English names follow **Create Agent**; the final UI labels are still open.
 
-| Begriff | Bedeutung |
+| Term | Meaning |
 | --- | --- |
-| **Buzz Server** | Das eigenständige Produkt zum Betrieb und zur Verwaltung von Buzz Agents auf einem headless Linux-Host. Kein Buzz-Relay. |
-| **Server-CLI** | Die vollständige Verwaltungsoberfläche auf dem Host. Kann Agenten ohne Desktop-Client anlegen, auflisten, starten, stoppen, konfigurieren und löschen. |
-| **Host** | Der Rechner, auf dem ein Agent läuft. Ein **Remote Host** ist aus Sicht des Desktop-Clients ein per SSH erreichbarer Linux-Host mit Buzz Server. |
-| **Desktop Client** | Eine konkrete Installation von Buzz Desktop mit Verwaltungs-Plugin. Optionale GUI für dieselben Verwaltungsoperationen; kein eigener Agentenbestand. |
-| **Operator** | Eine Person mit der Berechtigung, auf einem Host Agenten zu verwalten. SSH-Erreichbarkeit allein beschreibt noch keine Verwaltungsberechtigung. |
-| **Run Target** | Die Auswahl, wo der Agent laufen soll: auf dem lokalen Rechner oder auf einem Remote Host. Kein Inference Provider. |
-| **Connection Test** | Prüft, ob der Desktop den gewählten Host erreicht und mit Buzz Server sprechen kann. Beweist weder, dass ein Agent läuft, noch dass das Modell antwortet. |
-| **Agent** | Der in Buzz ansprechbare Assistent mit einer Agent Identity, einem Profil, Laufkonfiguration und gegebenenfalls Agent State. **Local** und **Remote** beschreiben seinen Laufort, nicht zwei Arten von Identität. |
-| **Agent Identity** | Der stabile öffentliche Buzz-Schlüssel, unter dem der Agent ansprechbar ist und antwortet. Kein Anzeigename, kein Provider-Login und kein Linux-Konto. |
-| **Agent Profile** | In Buzz sichtbare Angaben wie Anzeigename, Avatar und Beschreibung. Ein Profilwechsel erzeugt keine neue Agent Identity. |
-| **Runtime Configuration** | Betriebsparameter des Agenten: gewähltes Harness, Provider und Modell, System Prompt sowie Verweise auf Zugänge. Nicht der bereits erarbeitete Zustand. |
-| **Harness** | Die Laufzeitkomponente, die den Agenten ausführt bzw. seine Ausführung an Buzz anbindet. Der Inference Provider liefert Modellinferenz; er ist weder Harness noch Host. |
-| **Agent State** | Dauerhaft erarbeiteter Zustand: Gedächtnis, gespeicherte Sitzungen und Arbeitsdateien. Öffentliche Buzz-Nachrichten, Prozessspeicher und Zugangsdaten sind davon zu unterscheiden. |
-| **Linux Account** | Das Betriebssystemkonto, unter dem ein Agent läuft. Ein eigenes unprivilegiertes **Dienstkonto** pro Agent kann seine Dateien und Zugänge von denen anderer Agenten trennen. Nicht das SSH-Login des Operators und nicht die Agent Identity. |
-| **Create Agent** | Einen neuen Agenten mit eigener Identität am gewählten Run Target anlegen. Kein Umzug eines bestehenden Agenten. |
-| **Reconfigure Agent** | Die Konfiguration oder das Profil eines vorhandenen Agenten ändern, über die Server-CLI oder einen berechtigten Desktop. |
-| **Move Agent** | Betrieb, Konfiguration und dauerhaften Zustand an ein anderes Run Target verlagern und dieselbe Agent Identity behalten. Kein zweiter aktiver Agent unter diesem Schlüssel. |
-| **Delete Agent** | Den verwalteten Agenten am Host ausser Betrieb nehmen und aus der Verwaltung entfernen. Kein blosses Ausblenden auf einem Desktop; keine Zusage, frühere Buzz-Nachrichten oder sämtliche Daten zu vernichten. Die Aufbewahrungs- und Löschregeln sind offen. |
+| **Buzz Server** | The standalone product for running and managing Buzz Agents on a headless Linux host. Not a Buzz relay. |
+| **Server-CLI** | The complete management interface on the host. It can create, list, start, stop, configure and delete agents without a desktop client. |
+| **Host** | The machine an agent runs on. From the desktop client's point of view, a **Remote Host** is a Linux host with Buzz Server that it reaches over SSH. |
+| **Desktop Client** | A specific installation of Buzz Desktop with the management plugin. An optional GUI for the same management operations; it keeps no agent inventory of its own. |
+| **Operator** | A person with permission to manage agents on a host. Being able to reach the host over SSH does not by itself grant permission to manage it. |
+| **Run Target** | The choice of where the agent should run: on the local machine or on a Remote Host. Not an Inference Provider. |
+| **Connection Test** | Checks that the desktop reaches the chosen host and can talk to Buzz Server. It proves neither that an agent is running nor that the model answers. |
+| **Agent** | The assistant you address in Buzz, with an Agent Identity, a profile, a runtime configuration and, where present, Agent State. **Local** and **Remote** describe where it runs, not two kinds of identity. |
+| **Agent Identity** | The stable public Buzz key under which the agent is addressed and answers. Not a display name, not a provider login and not a Linux account. |
+| **Agent Profile** | Details visible in Buzz such as display name, avatar and description. Changing the profile does not create a new Agent Identity. |
+| **Runtime Configuration** | The agent's operating parameters: the chosen harness, provider and model, the system prompt, and references to credentials. Not the state the agent has built up. |
+| **Harness** | The runtime component that runs the agent or connects its execution to Buzz. The Inference Provider supplies model inference; it is neither the harness nor the host. |
+| **Agent State** | Durable state the agent has built up: memory, saved sessions and working files. Public Buzz messages, process memory and credentials are separate from it. |
+| **Linux Account** | The operating system account an agent runs under. A separate unprivileged **service account** per agent can keep its files and credentials apart from those of other agents. Not the operator's SSH login and not the Agent Identity. |
+| **Create Agent** | Create a new agent with its own identity on the chosen Run Target. Not moving an existing agent. |
+| **Reconfigure Agent** | Change the configuration or profile of an existing agent, through the Server-CLI or an authorized desktop. |
+| **Move Agent** | Shift operation, configuration and durable state to another Run Target while keeping the same Agent Identity. Never a second active agent under that key. |
+| **Delete Agent** | Take the managed agent out of operation on the host and remove it from management. Not merely hiding it on a desktop, and no promise to destroy earlier Buzz messages or all data. The retention and deletion rules are still open. |
 
-**Verwalten und Ansprechen sind getrennt:** Der Operator verwaltet über die Server-CLI oder über Desktop und SSH. Desktop und Mobile sprechen den Agenten über Buzz an. Dafür muss keine Verwaltungsverbindung offen sein.
+**Managing and addressing are separate:** The operator manages agents through the Server-CLI, or through a desktop and SSH. Desktop and mobile address the agent through Buzz. No management connection has to be open for that.
 
-Siehe [Vision](VISION.md) für den Ablauf mit zwei Desktops und Mobile.
+See the [Vision](VISION.md) for the flow with two desktops and mobile.
