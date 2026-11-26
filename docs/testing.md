@@ -77,12 +77,15 @@ The source-installer acceptance mode remains available without `--releases`.
 Independent review, both disposable modes, public anonymous asset downloads,
 a fresh OS install and live provider/relay verification remain separate gates.
 
-## Pre-command update consent (offline)
+## Installed CLI and update consent (offline)
 
-`tests/test_update_pty.py` builds two synthetic zipapps, replaces only their fixture
-transport and dispatch, and runs real terminal subprocesses. It checks acceptance,
-decline, failed download, JSON and non-TTY behavior, exact original argv and one
-observable dispatch side effect. It does not invoke systemd or contact GitHub.
+`tests/test_update_pty.py` installs two synthetic zipapps with a local release
+fixture and runs the launcher in a real terminal. It checks offline help and
+version shortcuts, offer eligibility and consent, dispatch once with the exact
+original arguments, and explicit updates during the daily offer throttle.
+A blocked metadata response verifies that progress arrives before the response.
+The tests also cover failed downloads, already-current output, and JSON and
+non-TTY behavior. They do not invoke systemd or contact GitHub.
 `tests/test_release.py` covers activation races, lock-free requests, installed
 artifact verification, old probe no-op handling, preferences and interruption.
 Run serially with the full bounded unittest command below; no live acceptance
@@ -124,19 +127,28 @@ git diff --check
 
 ## What the tests prove
 
-The lifecycle test uses a real private systemd user manager with a loopback relay
-fixture and deterministic ACP adapter. This is separate from the signed-reply
-test, which starts the managed worker directly against an isolated Buzz relay.
+The [v0.3.0 first-use evidence](https://github.com/j2-ms/buzz-server/pull/18)
+records a network-isolated trial with Buzz relay 0.3.0, Buzz Desktop 0.5.30 and
+Goose 1.60.2 using a deterministic OpenAI-compatible fixture. The trial
+admitted the dedicated agent's key on a membership-gated relay, confirmed its
+profile, and added that same key to a channel through Desktop. The owner
+mention and agent reply were read back in the original thread. Independent
+verification checked signatures, authors, channel and reply linkage.
 
-On disposable Ubuntu 24.04 amd64, Goose 1.60.2 and Buzz CLI/ACP 0.5.30 handled
-a synthetic owner mention. A text-only control did not post. A live model then
-chose Goose's shell tool on an isolated test with one upstream model request;
-only the shell tool was offered, and the post-tool completion was local. An
-owner readback verified the agent author, channel, original thread and signature.
-This does not qualify other models, relay policies or production configuration.
-Before deployment, verify a signed reply with a dedicated test agent, the
-intended relay policy and the actual provider. Mandatory NIP-OA is unsupported;
-host reboot was not tested.
+The same-account disposable lifecycle tests use a private systemd user manager,
+loopback relay fixture and deterministic ACP adapter. Those tests verify
+same-account lifecycle and recovery, including a manager restart. They provide
+separate evidence from the membership-gated first-reply trial.
+
+An earlier signed-reply test on disposable Ubuntu 24.04 amd64 ran the worker
+directly against an isolated Buzz relay. A text-only control did not post. One
+upstream model request selected Goose's shell tool, the only tool offered, and
+the post-tool completion was local. Owner readback verified the agent author,
+channel, original thread and signature. For a deployment, provider readiness
+and a signed reply with the intended provider and relay policy require separate
+verification. Mandatory owner attestation (NIP-OA) is unsupported. Verification
+across logout and host reboot is tracked in
+[issue #4](https://github.com/j2-ms/buzz-server/issues/4).
 
 ## Goose focused offline checks
 

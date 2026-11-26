@@ -341,18 +341,45 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertFalse(self.model.active)
 
     def test_dedicated_doctor_needs_no_operator_user_manager_or_sudo(self):
-        with (patch("buzz_server.account_process.run", return_value=SimpleNamespace(returncode=0, stdout=b"fixture-systemd\n")) as query,
+        out, err = io.StringIO(), io.StringIO()
+
+        def system_version(*args, **kwargs):
+            if terminal_run:
+                self.assertIn("Checking the dedicated account layout", err.getvalue())
+                self.assertIn("Checking the systemd system manager", err.getvalue())
+            return SimpleNamespace(returncode=0, stdout=b"fixture-systemd\n")
+
+        terminal_run = False
+        with (patch("buzz_server.account_process.run", side_effect=system_version) as query,
               patch("buzz_server.cli.Systemd.check", side_effect=AssertionError("user manager must not be checked")),
-              patch("buzz_server.release.before_command") as update_offer):
+              patch("buzz_server.release.before_command") as update_offer,
+              patch("buzz_server.dependencies.interactive", return_value=True)):
             result = self.call("doctor", "--account", "fixture")
-            plain = self.call("doctor", "--account", "fixture", structured=False)
+            terminal_run = True
+            argv = ["--state-dir", str(self.store.root), "--unit-dir", str(self.units), "doctor", "--account", "fixture"]
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(argv), 0)
+        plain = out.getvalue()
         update_offer.assert_not_called()
         self.assertIn("Dedicated-account preflight passed for fixture", plain)
         self.assertIn("Account layout and system manager reachability verified", plain)
+        self.assertIn("Runtime tools were not checked", plain)
+        self.assertIn("relay access and Buzz replies were not checked", plain)
         self.assertIn("buzz-server create AGENT --account fixture", plain)
         self.assertEqual(query.call_args.args[0], ["/usr/bin/systemctl", "--system", "show", "--property=Version", "--value"])
         self.assertIs(result["buzz_response_verified"], False)
         self.run.assert_not_called()
+
+    def test_dedicated_doctor_plain_failure_preserves_guidance(self):
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["--state-dir", str(self.store.root), "--unit-dir", str(self.units), "doctor", "--account", "fixture"]
+        with (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
+              patch("buzz_server.account_process.run", return_value=SimpleNamespace(returncode=1, stdout=b""))):
+            self.assertEqual(cli.main(argv), 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("Dedicated-account preflight failed [supervisor_unavailable]", err.getvalue())
+        self.assertIn("inspect systemctl --system locally", err.getvalue())
+        self.assertIn("relay access and Buzz replies were not checked", err.getvalue())
 
     def test_dedicated_doctor_explains_home_prerequisite_without_repair(self):
         original = Path.lstat
