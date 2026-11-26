@@ -53,7 +53,7 @@ class Commands:
                          capture_output=not terminal, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired):
             raise Error("account_command_failed", "The authorized system command failed or timed out. State is retained; inspect locally and retry.") from None
-        if allow_difference and result.returncode == 1 and not result.stderr:
+        if allow_difference and result.returncode == 1:
             return None
         if result.returncode and not (allow_missing and b"\nLoadState=not-found\n" in b"\n" + result.stdout):
             raise Error("account_command_failed", "The authorized system command did not succeed. State is retained; inspect locally and retry.")
@@ -114,11 +114,26 @@ class Commands:
             raise ValueError("invalid deployment slot")
         return self.deployment_root / (("prompt-" if prompt else "worker-") + str(slot))
 
-    def prompt_matches(self, slot, prompt):
+    def deployment_source(self, source, name):
+        from .account_supervisor import conflict
+        source = Path(source)
+        if (source.name != name or source.parent.parent != self.bindings.root
+                or not source.parent.name.startswith(".deployment-")):
+            raise ValueError("unbound deployment source")
+        parent = source.parent.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700:
+            conflict()
+        info = source.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            conflict()
+        return source
+
+    def prompt_matches(self, slot, source):
         target = self.deployment_directory(slot, prompt=True) / "prompt"
         self.deployment_file(target, 0o600)
+        source = self.deployment_source(source, "prompt")
         return self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/cmp",
-                          "--silent", "--", "-", str(target)], input=prompt, allow_difference=True) is not None
+                          "--silent", "--", str(source), str(target)], allow_difference=True) is not None
 
     def stage_deployment(self, slot, files, *, prompt=False):
         from .account_supervisor import conflict
@@ -139,16 +154,7 @@ class Commands:
                 conflict()
         for name, source in files.items():
             # The source is created by the operator under the validated binding root.
-            source = Path(source)
-            if (source.name != name or source.parent.parent != self.bindings.root
-                    or not source.parent.name.startswith(".deployment-")):
-                raise ValueError("unbound deployment source")
-            parent = source.parent.lstat()
-            if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700:
-                conflict()
-            info = source.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-                conflict()
+            source = self.deployment_source(source, name)
             mode = modes[name]
             target = directory / name
             stage = directory / ("." + name + ".stage")

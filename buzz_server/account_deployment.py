@@ -1,4 +1,5 @@
 """Operator-side selection of dedicated worker payloads and approved prompts."""
+from contextlib import contextmanager
 import hashlib
 from pathlib import Path
 import re
@@ -174,13 +175,18 @@ class Deployment:
             self.commands.stage_deployment(slot, {name: stage / name for name in PAYLOAD_MODES})
         return {"slot": slot, **version}
 
-    def stage_prompt(self, source, active, previous):
-        prompt = read_prompt(source)
-        slot = slot_for(active, previous)
+    @contextmanager
+    def prompt_source(self, prompt):
         with tempfile.TemporaryDirectory(prefix=".deployment-", dir=self.path.parent) as temp:
             staged = Path(temp) / "prompt"
             staged.touch(mode=0o600)
             staged.write_bytes(prompt)
+            yield staged
+
+    def stage_prompt(self, source, active, previous):
+        prompt = read_prompt(source)
+        slot = slot_for(active, previous)
+        with self.prompt_source(prompt) as staged:
             self.commands.authenticate()
             self.commands.stage_deployment(slot, {"prompt": staged}, prompt=True)
         return {"slot": slot, "revision": secrets.token_hex(16)}
@@ -194,8 +200,11 @@ class Deployment:
                 raise Error("deployment_incomplete", f"The CLI builds a different worker from the staged payload. Retry with the original CLI or run buzz-server stop {doc['id']} before upgrading again.")
             prompt = read_prompt(args.file) if action == "prompt activate" else None
             self.commands.authenticate()
-            if prompt is not None and not self.commands.prompt_matches(selected["prompt"]["slot"], prompt):
-                raise Error("deployment_incomplete", f"The supplied prompt differs from the staged revision. Retry with the original bytes or run buzz-server stop {doc['id']} before activating a different revision.")
+            if prompt is not None:
+                with self.prompt_source(prompt) as staged:
+                    matches = self.commands.prompt_matches(selected["prompt"]["slot"], staged)
+                if not matches:
+                    raise Error("deployment_incomplete", f"The supplied prompt could not be matched to the staged revision. Verify operator sudo and retry with the original bytes, or run buzz-server stop {doc['id']} before activating a different revision.")
             return self.finish(doc)
 
         state = lifecycle.supervisor.inspect()

@@ -67,8 +67,8 @@ class DeploymentCommandsTests(unittest.TestCase):
                 shutil.copyfile(args[-1], path)
                 path.chmod(mode)
         elif tool == "/usr/bin/cmp":
-            source = kwargs["input"] if args[-1] == "-" else Path(args[-1]).read_bytes()
-            result = int(source != path.read_bytes())
+            self.assertIsNone(kwargs["input"])
+            result = int(Path(args[-1]).read_bytes() != path.read_bytes())
         elif tool == "/usr/bin/mv":
             Path(args[-1]).replace(path)
         elif tool == "/usr/bin/rm":
@@ -94,10 +94,10 @@ class DeploymentCommandsTests(unittest.TestCase):
             ["/usr/bin/mv", "-T", "--", str(self.staged), str(self.target)],
             ["/usr/bin/sync", "-f", "--", str(self.target.parent)],
         ])
-        self.assertTrue(self.commands.prompt_matches(0, b"synthetic approved"))
-        self.assertFalse(self.commands.prompt_matches(0, b"synthetic edited"))
-        self.assertEqual(self.run.call_args.args[0][3:], ["/usr/bin/cmp", "--silent", "--", "-", str(self.target)])
-        self.assertEqual(self.run.call_args.kwargs["input"], b"synthetic edited")
+        self.assertTrue(self.commands.prompt_matches(0, self.source))
+        atomic(self.source, b"synthetic edited")
+        self.assertFalse(self.commands.prompt_matches(0, self.source))
+        self.assertEqual(self.run.call_args.args[0][3:], ["/usr/bin/cmp", "--silent", "--", str(self.source), str(self.target)])
 
     def test_slot_tampering_refuses_before_system_effects(self):
         self.stage()
@@ -108,7 +108,7 @@ class DeploymentCommandsTests(unittest.TestCase):
         self.target.chmod(0o600)
         self.owners[self.target] = (0, 1000)
         with self.assertRaises(Error):
-            self.commands.prompt_matches(0, b"synthetic approved")
+            self.commands.prompt_matches(0, self.source)
         self.owners.clear()
         hardlink = self.target.with_name("extra-link")
         hardlink.hardlink_to(self.target)

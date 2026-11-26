@@ -129,9 +129,10 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertEqual(argv[3:], ["-T", "--", str(self.model.stage_path), str(self.model.unit_path)])
             self.model.publish_unit()
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/cmp"]:
-            self.assertEqual(argv[3:6], ["--silent", "--", "-"])
+            self.assertEqual(argv[3:5], ["--silent", "--"])
             self.assertEqual(len(argv), 7)
-            matches = self.deployment_files[Path(argv[-1])] == kwargs["input"]
+            self.assertIsNone(kwargs["input"])
+            matches = self.deployment_files[Path(argv[-1])] == Path(argv[-2]).read_bytes()
             return SimpleNamespace(returncode=0 if matches else 1, stdout=b"", stderr=b"")
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/mv"]:
             self.assertEqual(argv[3:], ["-T", "--", str(self.model.stage_path), str(self.model.unit_path)])
