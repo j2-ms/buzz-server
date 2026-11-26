@@ -39,8 +39,12 @@ The synthetic dedicated CLI tests cover an upgrade without replacing identity,
 configuration or private state, keeping a stopped service disabled, reporting
 the selected and running versions, rolling back after failed startup, and
 retrying after the unit file was replaced but before the manager loaded it.
-They also check that a prompt file edit requires a new activation and that
-reconfiguration leaves the approved revision selected. The packaged worker test
+They also check that an interrupted activation accepts only the staged prompt
+bytes, that an interrupted upgrade requires the original worker and pins, and
+that reconfiguration leaves the approved prompt selected.
+`test_accounts.py` uses scratch files and synthetic root ownership to check the
+fixed staging commands, comparison before publication, unit content checks,
+and refusal of unsafe modes, ownership and links. The packaged worker test
 feeds a synthetic credential to the actual worker archive and checks that the
 adapter is given that file directly. A missing or substituted credential causes
 startup refusal. Operator dependency tests check whole-directory publication and

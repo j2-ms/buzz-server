@@ -128,6 +128,11 @@ class DedicatedCliTests(unittest.TestCase):
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/ln"]:
             self.assertEqual(argv[3:], ["-T", "--", str(self.model.stage_path), str(self.model.unit_path)])
             self.model.publish_unit()
+        elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/cmp"]:
+            self.assertEqual(argv[3:6], ["--silent", "--", "-"])
+            self.assertEqual(len(argv), 7)
+            matches = self.deployment_files[Path(argv[-1])] == kwargs["input"]
+            return SimpleNamespace(returncode=0 if matches else 1, stdout=b"", stderr=b"")
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/mv"]:
             self.assertEqual(argv[3:], ["-T", "--", str(self.model.stage_path), str(self.model.unit_path)])
             self.model.replace_unit()
@@ -300,6 +305,45 @@ class DedicatedCliTests(unittest.TestCase):
             fetch.assert_called_once()
         self.assertTrue(finished["runtime_started"])
         self.assertEqual(self.model.effects.count("replace"), 1)
+
+    def test_interrupted_prompt_activation_requires_matching_bytes(self):
+        self.create()
+        packages, staging = self.upgrade_fixture()
+        with packages, staging:
+            self.call("worker", "upgrade", "assistant")
+        self.call("start", "assistant")
+        original = self.prompt.read_bytes()
+        command = ("prompt", "activate", "assistant", "--file", str(self.prompt))
+        self.model.fail = "reload"
+        self.call(*command, success=False)
+        self.model.fail = None
+        effects = self.model.effects[:]
+        atomic(self.prompt, b"SYNTHETIC-PRIVATE-EDITED")
+        error = self.call(*command, success=False)
+        self.assertEqual(error["code"], "deployment_incomplete")
+        self.assertIn("stop assistant", error["message"])
+        self.assertEqual(self.model.effects, effects)
+        self.assertFalse(self.model.active)
+        atomic(self.prompt, original)
+        finished = self.call(*command)
+        self.assertTrue(finished["runtime_started"])
+        self.assertIsNotNone(finished["deployment"]["prompt_revision"])
+        self.assertEqual(self.model.effects.count("replace"), 2)
+
+    def test_interrupted_worker_upgrade_refuses_different_cli_payload(self):
+        self.create()
+        packages, staging = self.upgrade_fixture()
+        with packages, staging as fetch:
+            self.model.fail = "replace"
+            self.call("worker", "upgrade", "assistant", success=False)
+            self.model.fail = None
+            effects = self.model.effects[:]
+            with patch("buzz_server.account_deployment.__version__", "2.0.0"):
+                error = self.call("worker", "upgrade", "assistant", success=False)
+            self.assertEqual(error["code"], "deployment_incomplete")
+            self.assertEqual(self.model.effects, effects)
+            self.call("worker", "upgrade", "assistant")
+            fetch.assert_called_once()
 
     def test_explicit_stop_cancels_an_unpublished_switch(self):
         self.create()

@@ -59,6 +59,25 @@ def same_slot(left, right):
     return left is not None and right is not None and left.get("slot") == right.get("slot")
 
 
+def worker_metadata(payload):
+    return {"version": __version__, "sha256": hashlib.sha256(payload).hexdigest(),
+            "tools": {p["name"]: {"version": p["version"], "sha256": p["sha256"]} for p in dependencies.PACKAGES}}
+
+
+def matches_worker(candidate, metadata):
+    return all(candidate.get(key) == value for key, value in metadata.items())
+
+
+def read_prompt(source):
+    prompt = read_private(source, 65536)
+    try:
+        if not config.text(prompt.decode("utf-8"), 65536, True):
+            raise ValueError()
+    except ValueError:
+        raise Error("invalid_config", "Use an operator-owned private UTF-8 prompt file of at most 64 KiB.") from None
+    return prompt
+
+
 class Deployment:
     def __init__(self, lifecycle):
         self.lifecycle = lifecycle
@@ -142,9 +161,8 @@ class Deployment:
 
     def stage_worker(self, active, previous, *, structured):
         payload = worker_payload.build()
-        version = {"version": __version__, "sha256": hashlib.sha256(payload).hexdigest(),
-                   "tools": {p["name"]: {"version": p["version"], "sha256": p["sha256"]} for p in dependencies.PACKAGES}}
-        if all(active.get(key) == value for key, value in version.items()):
+        version = worker_metadata(payload)
+        if matches_worker(active, version):
             return active
         slot = slot_for(active, previous)
         with tempfile.TemporaryDirectory(prefix=".deployment-", dir=self.path.parent) as temp:
@@ -157,12 +175,7 @@ class Deployment:
         return {"slot": slot, **version}
 
     def stage_prompt(self, source, active, previous):
-        prompt = read_private(source, 65536)
-        try:
-            if not config.text(prompt.decode("utf-8"), 65536, True):
-                raise ValueError()
-        except ValueError:
-            raise Error("invalid_config", "Use an operator-owned private UTF-8 prompt file of at most 64 KiB.") from None
+        prompt = read_prompt(source)
         slot = slot_for(active, previous)
         with tempfile.TemporaryDirectory(prefix=".deployment-", dir=self.path.parent) as temp:
             staged = Path(temp) / "prompt"
@@ -176,7 +189,13 @@ class Deployment:
         lifecycle = self.lifecycle
         self.guard(action)
         if self.record and self.record["pending"]:
+            selected = self.record["pending"]["next"]
+            if action == "worker upgrade" and not matches_worker(selected["worker"], worker_metadata(worker_payload.build())):
+                raise Error("deployment_incomplete", f"The CLI builds a different worker from the staged payload. Retry with the original CLI or run buzz-server stop {doc['id']} before upgrading again.")
+            prompt = read_prompt(args.file) if action == "prompt activate" else None
             self.commands.authenticate()
+            if prompt is not None and not self.commands.prompt_matches(selected["prompt"]["slot"], prompt):
+                raise Error("deployment_incomplete", f"The supplied prompt differs from the staged revision. Retry with the original bytes or run buzz-server stop {doc['id']} before activating a different revision.")
             return self.finish(doc)
 
         state = lifecycle.supervisor.inspect()

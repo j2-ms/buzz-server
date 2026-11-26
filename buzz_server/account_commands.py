@@ -44,7 +44,8 @@ class Commands:
         if self.interactive and all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)):
             print(message, file=sys.stderr, flush=True)
 
-    def _run(self, argv, *, input=None, stdin=None, terminal=False, timeout=30, allow_missing=False):
+    def _run(self, argv, *, input=None, stdin=None, terminal=False, timeout=30, allow_missing=False,
+             allow_difference=False):
         self.bindings.revalidate(self.binding)
         try:
             result = run(argv, env=CLEAN_ENV.copy(), cwd="/", umask=0o077,
@@ -52,6 +53,8 @@ class Commands:
                          capture_output=not terminal, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired):
             raise Error("account_command_failed", "The authorized system command failed or timed out. State is retained; inspect locally and retry.") from None
+        if allow_difference and result.returncode == 1 and not result.stderr:
+            return None
         if result.returncode and not (allow_missing and b"\nLoadState=not-found\n" in b"\n" + result.stdout):
             raise Error("account_command_failed", "The authorized system command did not succeed. State is retained; inspect locally and retry.")
         return result.stdout
@@ -106,14 +109,23 @@ class Commands:
     def deployment_root(self):
         return Path("/var/lib/buzz-server") / self.binding.service
 
-    def stage_deployment(self, slot, files, *, prompt=False):
-        from .account_supervisor import conflict
+    def deployment_directory(self, slot, *, prompt):
         if type(slot) is not int or slot not in (0, 1, 2):
             raise ValueError("invalid deployment slot")
+        return self.deployment_root / (("prompt-" if prompt else "worker-") + str(slot))
+
+    def prompt_matches(self, slot, prompt):
+        target = self.deployment_directory(slot, prompt=True) / "prompt"
+        self.deployment_file(target, 0o600)
+        return self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/cmp",
+                          "--silent", "--", "-", str(target)], input=prompt, allow_difference=True) is not None
+
+    def stage_deployment(self, slot, files, *, prompt=False):
+        from .account_supervisor import conflict
         modes = {"prompt": 0o600} if prompt else PAYLOAD_MODES
         if set(files) != set(modes):
             raise ValueError("invalid deployment files")
-        directory = self.deployment_root / (("prompt-" if prompt else "worker-") + str(slot))
+        directory = self.deployment_directory(slot, prompt=prompt)
         for path in (*reversed(directory.parents), directory):
             try:
                 info = path.lstat()

@@ -142,10 +142,18 @@ stages a separate worker and tool set before stopping the service. An agent
 requested running is restarted. A stopped agent stays stopped. The switch
 preserves the agent identity, configuration, Goose setup and private state.
 If startup fails, check `status` and use `worker rollback` to select the
-previous payload. Retry an interrupted command to finish its recorded switch.
+previous payload. Retry an interrupted upgrade with the CLI that staged it.
 An explicit `stop` cancels an unpublished switch or stops the installed unit.
 Allow disk space for up to three worker payloads plus download and verification
 scratch space. Root-owned payloads are under `/var/lib/buzz-server`.
+
+Maintenance uses fixed sudo effects. For operators with exact-effect
+authorization, staging uses `/usr/bin/install -d` and `/usr/bin/install -T`
+under `/var/lib/buzz-server`, then `/usr/bin/cmp --silent`,
+`/usr/bin/mv -T`, and `/usr/bin/sync -f`. Recovery can remove an interrupted
+stage with `/usr/bin/rm`. Switching also replaces the staged unit in
+`/etc/systemd/system` with `mv -T` and synchronizes that directory before
+`systemctl --system daemon-reload`. All effects use existing operator sudo.
 
 After the worker upgrade, approve an operator-owned prompt file with private
 permissions such as mode 0600. The file must be UTF-8 and at most 64 KiB.
@@ -161,6 +169,10 @@ Run it again to approve edits. Automatic retry and reboot use the selected
 snapshot. Systemd loads it as a read-only credential for the bound account, and
 the root-owned worker passes it directly to the adapter. The source file and its
 surrounding directory stay private to the operator. `status` shows revision IDs.
+To finish an interrupted activation, supply a file with the originally staged
+bytes. Use `stop` before starting a new activation if the source has changed.
+Goose can also load instructions from agent-writable configuration and its
+working directory.
 `prompt rollback` reselects the prior approved revision, and `prompt clear`
 returns to the prompt from the agent configuration. Clear the active prompt
 before rolling back to the original worker.
