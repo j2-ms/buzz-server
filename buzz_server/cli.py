@@ -82,6 +82,20 @@ def parser():
     inference = sub.add_subparsers(dest="inference_operation", required=True, parser_class=Parser)
     setup = inference.add_parser("configure", help="Run Goose setup interactively for a stopped agent")
     setup.add_argument("id", type=agent_id)
+    worker = commands.add_parser("worker", help="Manage the worker payload of a dedicated agent")
+    worker_ops = worker.add_subparsers(dest="deployment_operation", required=True, parser_class=Parser)
+    worker_ops.add_parser("upgrade", help="Install this CLI's pinned worker and tools for one agent").add_argument("id", type=agent_id)
+    worker_ops.add_parser("rollback", help="Restore the previous worker payload").add_argument("id", type=agent_id)
+    prompt = commands.add_parser("prompt", help="Manage approved prompt revisions for a dedicated agent")
+    prompt_ops = prompt.add_subparsers(dest="deployment_operation", required=True, parser_class=Parser)
+    activate = prompt_ops.add_parser("activate", help="Approve and activate a snapshot of an operator-owned prompt file")
+    activate.add_argument("id", type=agent_id)
+    activate.add_argument("--file", required=True, help="Path to a private, operator-owned UTF-8 prompt file")
+    prompt_ops.add_parser("rollback", help="Restore the previous approved prompt revision").add_argument("id", type=agent_id)
+    prompt_ops.add_parser("clear", help="Use the prompt from the agent configuration again").add_argument("id", type=agent_id)
+    tools = commands.add_parser("dependencies", help="Manage the operator's private dependency set")
+    tools_ops = tools.add_subparsers(dest="dependencies_operation", required=True, parser_class=Parser)
+    tools_ops.add_parser("refresh", help="Verify and replace the operator's private tools with this CLI's pins")
     sub = commands.add_parser("account-plan", help="Render the optional pre-existing service-account administration plan; changes nothing")
     sub.add_argument("--account", required=True)
     return p
@@ -165,6 +179,8 @@ def execute(args):
         check = "dedicated account layout" if args.account else "systemd user manager"
         print(f"Checking the {check}...", file=sys.stderr, flush=True)
     store = Store(args.state_dir)
+    if args.operation == "dependencies":
+        return dependencies.refresh(store, structured=args.json)
     from . import account_lifecycle
     from .accounts import Bindings, account
     bindings = Bindings(store)
@@ -220,7 +236,7 @@ def execute(args):
             separate = []
             for path in sorted(bindings.root.glob("*.json")):
                 # Only the exact binding filename grammar, never journal files.
-                if path.name.endswith((".agent.json", ".unit-operation.json")):
+                if path.name.endswith(account_lifecycle.RECORD_SUFFIXES):
                     continue
                 ident = agent_id(path.stem)
                 bound = bindings.load(ident)
@@ -241,6 +257,8 @@ def execute(args):
             if doc["phase"] != "ready" and not (args.operation == "delete" and doc["phase"] in {"deleting", "unit_removed"}):
                 raise Error("account_incomplete", "The dedicated-account lifecycle is incomplete. Retry the original create/delete command.")
             return account_lifecycle.Lifecycle(store, bound, interactive=not args.json).execute(args, doc)
+    if args.operation in {"worker", "prompt"}:
+        raise Error("dedicated_required", "This command requires an existing dedicated-account agent.")
     supervisor = Systemd(store, args.unit_dir)
     guided = None
     if args.operation == "create" and not args.config:
@@ -453,6 +471,17 @@ def render(operation, data):
         elif "startup" in data:
             from .account_lifecycle import render_startup
             lines.extend(render_startup(data))
+            deployment = data["deployment"]
+            selected = deployment["selected_worker"]
+            if selected is None:
+                lines.append(f"Worker version unrecorded. Run buzz-server worker upgrade {data['id']} to install a verified payload.")
+            else:
+                pins = ", ".join(f"{name} {pin['version']}" for name, pin in sorted(selected["tools"].items()))
+                lines.append(f"Selected worker {selected['version']} ({pins}).")
+                if deployment["running_worker"] is not None:
+                    lines.append(f"Running worker {selected['version']}.")
+            if deployment["prompt_revision"]:
+                lines.append(f"Approved prompt revision {deployment['prompt_revision']}.")
         else:
             lines.append("Local runtime process observed." if data["runtime_started"] else "Local runtime readiness unverified.")
             lines.append("Buzz reply untested. See First reply in docs/quickstart.md.")
@@ -464,6 +493,8 @@ def render(operation, data):
                 f"If you cancelled, rerun buzz-server inference configure {data['id']}.")
     if operation == "delete":
         return f"{data['id']}: stopped and removed from management. Private data, Linux account and Buzz history retained."
+    if operation == "dependencies":
+        return "Refreshed private tools: " + ", ".join(data["dependencies_refreshed"]) + "."
     if operation == "install":
         lines = [f"Installed Buzz Server {data['version']} at {data['prefix']}."]
         if data.get("dependencies_installed"):

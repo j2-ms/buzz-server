@@ -24,22 +24,39 @@ class AccountSystemd:
                   "ExecReload", "Environment", "EnvironmentFiles", "PassEnvironment", "WorkingDirectory",
                   "RootDirectory", "RootImage", "NoNewPrivileges", "Type", "NotifyAccess", "ExecMainCode", "ExecMainStatus")
 
-    def __init__(self, commands):
+    def __init__(self, commands, *, worker_slot=None, prompt_slot=None, legacy_type=None):
         self.commands = commands
         self.binding = commands.binding
+        self.worker_slot = worker_slot
+        self.prompt_slot = prompt_slot
+        self.legacy_type = legacy_type
         self.source = commands.bindings.root / (self.binding.id + ".unit")
         self.journal = commands.bindings.root / (self.binding.id + ".unit-operation.json")
 
     @property
     def argv(self):
         b = self.binding
-        return ["/usr/bin/python3", "-I", b.data + "/worker.pyz", b.data + "/state", b.id]
+        if self.worker_slot is None:
+            return ["/usr/bin/python3", "-I", b.data + "/worker.pyz", b.data + "/state", b.id]
+        mode = "local" if self.prompt_slot is None else f"prompt-{self.prompt_slot}"
+        return ["/usr/bin/python3", "-I", str(self.payload / "worker.pyz"), b.data + "/state", b.id, mode]
 
-    def content(self, *, legacy=False):
+    @property
+    def payload(self):
+        return None if self.worker_slot is None else self.commands.deployment_root / f"worker-{self.worker_slot}"
+
+    @property
+    def credential(self):
+        if self.prompt_slot is None:
+            return None
+        return self.commands.deployment_root / f"prompt-{self.prompt_slot}" / "prompt"
+
+    def content(self, *, legacy=None):
         b = self.binding
         # Every substituted value comes from the validated operator binding,
         # with a restricted alphabet. No target config, paths or command hooks.
         # Even four full start timeouts, stop timeouts and delays fit inside this window.
+        legacy = self.legacy_type == "exec" if legacy is None else legacy
         limits = "StartLimitIntervalSec=0\n" if legacy else "StartLimitIntervalSec=300\nStartLimitBurst=4\n"
         prevent = f"{STARTUP_EXIT['local_setup_refused']} {STARTUP_EXIT['profile_refused']}"
         startup = ("Type=exec\n" if legacy else "Type=notify\nNotifyAccess=main\nTimeoutStartSec=30\n"
@@ -47,6 +64,7 @@ class AccountSystemd:
         return ("[Unit]\nDescription=Buzz Server dedicated-account agent\n" + limits +
                 "[Service]\n" + startup + "User=" + str(b.uid) + "\nGroup=" + str(b.gid) +
                 "\nExecStart=:" + " ".join(self.argv) +
+                (f"\nLoadCredential=prompt:{self.credential}" if self.credential else "") +
                 "\nWorkingDirectory=/\nEnvironment=PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + b.home +
                 "\nUMask=0077\nNoNewPrivileges=yes\nKillMode=control-group\nTimeoutStopSec=10\n"
                 "Restart=on-failure\nRestartSec=5\nStandardOutput=null\nStandardError=null\n"
@@ -80,13 +98,13 @@ class AccountSystemd:
             with path.open("rb") as stream:
                 content = stream.read(len(current) + 1)
             if content == current:
-                return "notify"
-            if path == self.commands.unit_path and content == legacy:
+                return self.legacy_type or "notify"
+            if self.worker_slot is None and self.legacy_type is None and path == self.commands.unit_path and content == legacy:
                 return "exec"
             conflict()
         return True
 
-    def inspect(self, *, missing=False, removing=False):
+    def read_state(self):
         self.commands.bindings.revalidate(self.binding)
         raw = self.commands.show(self.PROPERTIES)
         try:
@@ -96,6 +114,10 @@ class AccountSystemd:
                 conflict()
         except (ValueError, UnicodeError):
             conflict()
+        return state
+
+    def inspect(self, *, missing=False, removing=False):
+        state = self.read_state()
         if missing and state.get("LoadState") == "not-found":
             if (state.get("DropInPaths") != "" or state.get("FragmentPath") != ""
                     or state.get("ActiveState") not in {"inactive", "failed"}
@@ -114,16 +136,20 @@ class AccountSystemd:
             unit_type = state.get("Type")
         else:
             unit_type = self.root_file(self.commands.unit_path)
+        return self.check_state(state, unit_type, removing=removing)
+
+    def check_state(self, state, unit_type, *, removing=False, reloading=False):
         expected = {"Id": self.binding.service, "LoadState": "loaded",
                     "FragmentPath": str(self.commands.unit_path), "DropInPaths": "",
-                    "NeedDaemonReload": state["NeedDaemonReload"] if removing else "no", "KillMode": "control-group",
+                    "NeedDaemonReload": state.get("NeedDaemonReload") if removing or reloading else "no",
+                    "KillMode": "control-group",
                     "User": str(self.binding.uid), "Group": str(self.binding.gid),
                     "Environment": "PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + self.binding.home, "PassEnvironment": "",
                     "WorkingDirectory": "/", "RootDirectory": "", "RootImage": "", "NoNewPrivileges": "yes",
                     "Type": unit_type, "NotifyAccess": "main" if unit_type == "notify" else "none"}
         if unit_type not in {"notify", "exec"}:
             conflict()
-        if any(state.get(k) != v for k, v in expected.items()):
+        if state.get("NeedDaemonReload") not in {"yes", "no"} or any(state.get(k) != v for k, v in expected.items()):
             conflict()
         # systemctl 255 omits empty structured arrays even with --all. The
         # string-array printer still emits PassEnvironment=; require it above.
@@ -142,6 +168,48 @@ class AccountSystemd:
                 or state.get("UnitFileState") not in ({"disabled", "static", "not-found", ""} if removing else {"enabled", "disabled", "static"})):
             conflict()
         return state
+
+    def replacement_installed(self):
+        path = self.commands.unit_path
+        self.root_file(path, exact=False)
+        content = self.content()
+        with path.open("rb") as stream:
+            return stream.read(len(content) + 1) == content
+
+    @staticmethod
+    def require_disabled(state):
+        if (state["ActiveState"] not in {"inactive", "failed"} or state["MainPID"] != "0"
+                or state["UnitFileState"] not in {"disabled", "static"}
+                or not cgroup_empty(state["ControlGroup"])):
+            raise Error("stop_unverified", "The deployment switch requires an inactive, disabled unit with an empty cgroup.")
+
+    def replace(self, previous):
+        """Resume a journaled switch. Only the two expected unit definitions count."""
+        if self.replacement_installed():
+            try:
+                return self.inspect()
+            except Error as error:
+                if error.code != "unit_conflict":
+                    raise
+            # The root file was replaced, but the manager may still have the
+            # former definition. Validate it and prove stopped before reloading.
+            state = self.read_state()
+            try:
+                self.check_state(state, self.legacy_type or "notify", reloading=True)
+            except Error:
+                previous.check_state(state, previous.legacy_type or "notify", reloading=True)
+            self.require_disabled(state)
+        else:
+            self.require_disabled(previous.inspect())
+            if self.root_file(self.commands.stage_path, exact=False, missing=True):
+                self.commands.unlink_unit(stage=True)
+            atomic(self.source, self.content())
+            self.commands.stage_unit(self.source)
+            self.root_file(self.commands.stage_path)
+            self.commands.replace_unit()
+        self.commands.sync(self.commands.unit_path.parent)
+        self.commands.reload()
+        return self.inspect()
 
     def install(self):
         self.commands.bindings.revalidate(self.binding)

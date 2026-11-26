@@ -13,7 +13,8 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from buzz_server import cli, release
+from buzz_server import cli, dependencies, release
+from buzz_server.account_commands import Commands
 from buzz_server.account_supervisor import AccountSystemd
 from buzz_server.account_lifecycle import manifest_path
 from buzz_server.errors import Error
@@ -51,6 +52,7 @@ class DedicatedCliTests(unittest.TestCase):
         self.private_state = b"SYNTHETIC-PRIVATE-STATE"
         self.requests = []
         self.installs = []
+        self.deployment_files = {}
         self.run.side_effect = self.system_run
         self.packages = ({"name": "fixture", "members": {n: (n, len(n)) for n in ("buzz", "buzz-acp", "goose")}},)
         patch("buzz_server.account_lifecycle.dependencies.PACKAGES", self.packages).start()
@@ -69,7 +71,6 @@ class DedicatedCliTests(unittest.TestCase):
                 self.model.binding = supervisor.binding
                 self.model.unit_path = supervisor.commands.unit_path
                 self.model.stage_path = supervisor.commands.stage_path
-            self.model.supervisor = supervisor
             if path not in self.model.files:
                 if missing:
                     return False
@@ -79,6 +80,18 @@ class DedicatedCliTests(unittest.TestCase):
             return "notify" if exact else True
 
         patch("buzz_server.account_supervisor.AccountSystemd.root_file", root_file).start()
+        patch.object(AccountSystemd, "replacement_installed", lambda unit: self.model.files[unit.commands.unit_path] == unit.content()).start()
+        patch.object(Commands, "stage_deployment", self.stage_deployment).start()
+        patch.object(Commands, "deployment_file", self.verify_deployment_file).start()
+
+    def stage_deployment(self, slot, files, *, prompt=False):
+        base = Path("/var/lib/buzz-server") / self.model.binding.service
+        directory = base / (f"prompt-{slot}" if prompt else f"worker-{slot}")
+        for name, path in files.items():
+            self.deployment_files[directory / name] = path.read_bytes()
+
+    def verify_deployment_file(self, path, *_):
+        self.assertIn(path, self.deployment_files)
 
     def system_run(self, argv, **kwargs):
         from types import SimpleNamespace
@@ -115,6 +128,17 @@ class DedicatedCliTests(unittest.TestCase):
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/ln"]:
             self.assertEqual(argv[3:], ["-T", "--", str(self.model.stage_path), str(self.model.unit_path)])
             self.model.publish_unit()
+        elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/cmp"]:
+            self.assertEqual(argv[3:5], ["--silent", "--"])
+            self.assertEqual(len(argv), 7)
+            self.assertIsNone(kwargs["input"])
+            matches = self.deployment_files[Path(argv[-1])] == Path(argv[-2]).read_bytes()
+            return SimpleNamespace(returncode=0 if matches else 1, stdout=b"", stderr=b"")
+        elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/mv"]:
+            self.assertEqual(argv[3:], ["-T", "--", str(self.model.stage_path), str(self.model.unit_path)])
+            self.model.replace_unit()
+        elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/sync"]:
+            self.assertEqual(argv[3:], ["-f", "--", str(self.model.unit_path.parent)])
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/rm"]:
             self.assertEqual(argv[3], "--")
             self.assertIn(argv[4], [str(self.model.stage_path), str(self.model.unit_path)])
@@ -183,6 +207,159 @@ class DedicatedCliTests(unittest.TestCase):
 
     def create(self):
         return self.call("create", "assistant", "--account", "fixture", "--config", str(self.config))
+
+    def upgrade_fixture(self):
+        packages = ({"name": "buzz", "version": "desktop-v1.2.3", "sha256": "ab" * 32},
+                    {"name": "goose", "version": "v4.5.6", "sha256": "cd" * 32})
+
+        def stage(directory, **kwargs):
+            for name in dependencies.NAMES:
+                (directory / name).write_bytes(name.encode())
+
+        return (patch.object(dependencies, "PACKAGES", packages), patch.object(dependencies, "stage_pins", side_effect=stage))
+
+    def test_named_worker_upgrade_reports_selection_and_rolls_back_after_failed_startup(self):
+        created = self.create()
+        self.call("start", "assistant")
+        before_revision = self.target_doc["revision"]
+        packages, staging = self.upgrade_fixture()
+        original_control = self.model.control
+
+        def control(operation):
+            original_control(operation)
+            if operation == "start":
+                self.model.overrides.update(ActiveState="failed", MainPID="0", ExecMainCode="1", ExecMainStatus="76")
+
+        with packages, staging as fetch, patch.object(self.model, "control", side_effect=control):
+            failed = self.call("worker", "upgrade", "assistant", success=False)
+            fetch.assert_called_once()
+        self.assertEqual(failed["code"], "local_runtime")
+        self.assertIn("worker rollback assistant", failed["message"])
+        status = self.call("status", "assistant")
+        self.assertEqual(status["deployment"]["selected_worker"]["tools"]["goose"]["version"], "v4.5.6")
+        self.assertTrue(status["deployment"]["worker_rollback_available"])
+        self.assertIsNone(status["deployment"]["running_worker"])
+        self.model.overrides.clear()
+        rolled_back = self.call("worker", "rollback", "assistant")
+        self.assertEqual(rolled_back["identity"], created["identity"])
+        self.assertEqual(rolled_back["revision"], before_revision)
+        self.assertEqual(self.target_doc["desired"], "running")
+        self.assertTrue(rolled_back["runtime_started"])
+        self.assertIsNone(rolled_back["deployment"]["selected_worker"])
+        self.assertEqual(rolled_back["deployment"]["previous_worker"], status["deployment"]["selected_worker"])
+        self.assertEqual(len(self.installs), 1)
+        self.assertEqual(self.private_state, b"SYNTHETIC-PRIVATE-STATE")
+
+    def test_prompt_revisions_are_snapshots_and_survive_configure_and_rollback(self):
+        created = self.create()
+        self.assertEqual(self.call("prompt", "activate", "assistant", "--file", str(self.prompt), success=False)["code"],
+                         "worker_upgrade_required")
+        packages, staging = self.upgrade_fixture()
+        with packages, staging as fetch:
+            selected = self.call("worker", "upgrade", "assistant")
+            self.assertEqual(self.call("worker", "upgrade", "assistant"), selected)
+            fetch.assert_called_once()
+        self.assertFalse(self.model.enabled)
+        self.assertIsNone(selected["deployment"]["running_worker"])
+        initial = b"SYNTHETIC-PRIVATE-PROMPT"
+        first = self.call("prompt", "activate", "assistant", "--file", str(self.prompt))
+        unit = self.model.files[self.model.unit_path]
+        credential = Path(next(line.split(":", 1)[1] for line in unit.decode().splitlines() if line.startswith("LoadCredential=")))
+        self.assertEqual(self.deployment_files[credential], initial)
+        self.assertNotIn(initial, unit)
+        self.assertNotIn(str(self.prompt).encode(), unit)
+        atomic(self.prompt, b"SYNTHETIC-PRIVATE-NEXT-PROMPT")
+        started = self.call("start", "assistant")
+        self.assertEqual(started["deployment"]["running_worker"], selected["deployment"]["selected_worker"])
+        self.assertEqual(self.deployment_files[credential], initial)
+        second = self.call("prompt", "activate", "assistant", "--file", str(self.prompt))
+        self.assertEqual(second["deployment"]["previous_prompt_revision"], first["deployment"]["prompt_revision"])
+        self.assertTrue(second["runtime_started"])
+        self.assertNotEqual(self.model.files[self.model.unit_path], unit)
+        configured = self.call("configure", "assistant", "--config", str(self.config))
+        self.assertEqual(configured["identity"], created["identity"])
+        self.assertEqual(configured["deployment"]["prompt_revision"], second["deployment"]["prompt_revision"])
+        rolled_back = self.call("prompt", "rollback", "assistant")
+        self.assertEqual(rolled_back["deployment"]["prompt_revision"], first["deployment"]["prompt_revision"])
+        self.assertEqual(self.model.files[self.model.unit_path], unit)
+        self.assertEqual(self.deployment_files[credential], initial)
+        self.assertEqual(self.call("worker", "rollback", "assistant", success=False)["code"], "prompt_active")
+        self.call("prompt", "clear", "assistant")
+        self.call("worker", "rollback", "assistant")
+        self.call("delete", "assistant")
+        self.assertEqual(self.call("list")["agents"], [])
+
+    def test_interrupted_switch_retries_without_fetching_and_requires_stopped_manager(self):
+        self.create()
+        self.call("start", "assistant")
+        packages, staging = self.upgrade_fixture()
+        with packages, staging as fetch:
+            self.model.fail = "reload"
+            self.call("worker", "upgrade", "assistant", success=False)
+            self.assertEqual(self.call("status", "assistant", success=False)["code"], "deployment_incomplete")
+            self.model.fail = None
+            self.model.overrides["ControlGroup"] = "/synthetic"
+            with patch("buzz_server.account_supervisor.cgroup_empty", return_value=False):
+                self.assertEqual(self.call("worker", "upgrade", "assistant", success=False)["code"], "stop_unverified")
+            self.model.overrides.clear()
+            finished = self.call("worker", "upgrade", "assistant")
+            fetch.assert_called_once()
+        self.assertTrue(finished["runtime_started"])
+        self.assertEqual(self.model.effects.count("replace"), 1)
+
+    def test_interrupted_prompt_activation_requires_matching_bytes(self):
+        self.create()
+        packages, staging = self.upgrade_fixture()
+        with packages, staging:
+            self.call("worker", "upgrade", "assistant")
+        self.call("start", "assistant")
+        original = self.prompt.read_bytes()
+        command = ("prompt", "activate", "assistant", "--file", str(self.prompt))
+        self.model.fail = "reload"
+        self.call(*command, success=False)
+        self.model.fail = None
+        effects = self.model.effects[:]
+        atomic(self.prompt, b"SYNTHETIC-PRIVATE-EDITED")
+        error = self.call(*command, success=False)
+        self.assertEqual(error["code"], "deployment_incomplete")
+        self.assertIn("stop assistant", error["message"])
+        self.assertEqual(self.model.effects, effects)
+        self.assertFalse(self.model.active)
+        atomic(self.prompt, original)
+        finished = self.call(*command)
+        self.assertTrue(finished["runtime_started"])
+        self.assertIsNotNone(finished["deployment"]["prompt_revision"])
+        self.assertEqual(self.model.effects.count("replace"), 2)
+
+    def test_interrupted_worker_upgrade_refuses_different_cli_payload(self):
+        self.create()
+        packages, staging = self.upgrade_fixture()
+        with packages, staging as fetch:
+            self.model.fail = "replace"
+            self.call("worker", "upgrade", "assistant", success=False)
+            self.model.fail = None
+            effects = self.model.effects[:]
+            with patch("buzz_server.account_deployment.__version__", "2.0.0"):
+                error = self.call("worker", "upgrade", "assistant", success=False)
+            self.assertEqual(error["code"], "deployment_incomplete")
+            self.assertEqual(self.model.effects, effects)
+            self.call("worker", "upgrade", "assistant")
+            fetch.assert_called_once()
+
+    def test_explicit_stop_cancels_an_unpublished_switch(self):
+        self.create()
+        self.call("start", "assistant")
+        unit = self.model.files[self.model.unit_path]
+        packages, staging = self.upgrade_fixture()
+        with packages, staging:
+            self.model.fail = "replace"
+            self.call("worker", "upgrade", "assistant", success=False)
+        self.model.fail = None
+        stopped = self.call("stop", "assistant")
+        self.assertFalse(self.model.active)
+        self.assertFalse(self.model.enabled)
+        self.assertEqual(self.model.files, {self.model.unit_path: unit})
+        self.assertIsNone(stopped["deployment"]["selected_worker"])
 
     def test_json_on_terminal_never_validates_and_sudo_failure_stays_structured(self):
         with patch("sys.stdin.isatty", return_value=True), \

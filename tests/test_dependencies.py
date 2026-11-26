@@ -37,6 +37,48 @@ class DependencyTests(unittest.TestCase):
         with self.assertRaises(Error):
             d.resolve('arbitrary', self.store.root)
 
+    def test_explicit_refresh_exchanges_complete_directory_at_same_paths(self):
+        directory = d.bin_dir(self.store.root, create=True)
+        old = directory / "goose"
+        old.write_bytes(b"old")
+        old.chmod(0o700)
+        inode = directory.stat().st_ino
+
+        def acquire(package, directory, **kwargs):
+            for name, _ in package["members"].values():
+                (directory / name).write_bytes(name.encode())
+                (directory / name).chmod(0o700)
+
+        with patch.object(d, "supported"), patch.object(d, "acquire", side_effect=acquire):
+            report = d.refresh(self.store, structured=True)
+        self.assertNotEqual(directory.stat().st_ino, inode)
+        self.assertEqual(report["dependencies_refreshed"], list(d.NAMES))
+        self.assertEqual(report["managed_tool_paths"]["goose"], str(old))
+        self.assertFalse(report["workers_restarted"])
+        self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, {n: n.encode() for n in d.NAMES})
+
+    def test_failed_refresh_retains_original_directory_and_reports_static_error(self):
+        directory = d.bin_dir(self.store.root, create=True)
+        original = directory / "buzz"
+        original.write_bytes(b"old")
+        original.chmod(0o700)
+        inode = directory.stat().st_ino
+
+        def acquire(package, directory, **kwargs):
+            if package["name"] == "goose":
+                raise EOFError("synthetic-private-details")
+            for name, _ in package["members"].values():
+                (directory / name).write_bytes(b"staged")
+
+        with patch.object(d, "supported"), patch.object(d, "acquire", side_effect=acquire):
+            with self.assertRaises(Error) as failure:
+                d.refresh(self.store, structured=True)
+        self.assertEqual(failure.exception.code, "dependency_refused")
+        self.assertNotIn("synthetic-private-details", str(failure.exception))
+        self.assertEqual(directory.stat().st_ino, inode)
+        self.assertEqual(list(directory.iterdir()), [original])
+        self.assertEqual(original.read_bytes(), b"old")
+
     def test_managed_permissions_links_and_unknown_entries_rejected(self):
         directory = d.bin_dir(self.store.root, create=True)
         target = directory / 'goose'

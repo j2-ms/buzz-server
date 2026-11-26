@@ -33,6 +33,41 @@ contact providers/relays. A real disposable dedicated-account lifecycle and a
 signed Buzz reply require separate verification. Persistent unit configuration
 is not evidence of unattended reboot behavior.
 
+## Worker and prompt deployment
+
+The synthetic dedicated CLI tests cover an upgrade without replacing identity,
+configuration or private state, keeping a stopped service disabled, reporting
+the selected and running versions, rolling back after failed startup, and
+retrying after the unit file was replaced but before the manager loaded it.
+They also check that an interrupted activation accepts only the staged prompt
+bytes, that an interrupted upgrade requires the original worker and pins, and
+that reconfiguration leaves the approved prompt selected.
+`test_accounts.py` uses scratch files and synthetic root ownership to check the
+fixed staging commands, comparison before publication, unit content checks,
+and refusal of unsafe modes, ownership and links. The packaged worker test
+feeds a synthetic credential to the actual worker archive and checks that the
+adapter is given that file directly. A missing or substituted credential causes
+startup refusal. Operator dependency tests check whole-directory publication and
+preservation of the previous directory after failed staging.
+
+The hosted Ubuntu test runner additionally exercises real systemd credential
+delivery with a transient unit running only as the unprivileged test UID.
+It checks that the packaged reader can read the synthetic credential and that
+the service UID cannot make it writable. To run just that check on a disposable
+systemd host with existing operator sudo authorization:
+
+```sh
+BUZZ_SERVER_TEST_SYSTEM_CREDENTIALS=1 PYTHONPATH=tests timeout 30s \
+  /usr/bin/python3 -B -m unittest \
+  test_worker_payload.WorkerPayloadTests.test_packaged_reader_accepts_real_systemd_credential -v
+```
+
+The [reboot results](https://github.com/j2-ms/buzz-server/issues/4#issuecomment-7202259824)
+cover the released v0.3.0 system and user units on Ubuntu 24.04 and 26.04 amd64.
+The new deployment switch and managed prompt selection are covered by the
+focused checks above. Full deployment and reboot acceptance for those changes
+requires a disposable VM with the service account and sudo already configured.
+
 ## Disposable lifecycle test
 
 Use an isolated Linux environment with Python 3.12+, OpenSSL, `dbus-daemon`, and systemd with cgroup v2. Install trusted `buzz` and `buzz-acp` binaries in `/usr/bin` or `/usr/local/bin` and run as an unprivileged user:

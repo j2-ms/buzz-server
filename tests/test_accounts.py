@@ -2,17 +2,141 @@
 import json
 import os
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 import stat
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, PropertyMock, patch
 
 from buzz_server.accounts import Bindings
 from buzz_server.account_commands import CLEAN_ENV, Commands
+from buzz_server.account_supervisor import AccountSystemd
 from buzz_server.errors import Error
 from buzz_server.storage import Store, atomic
+
+
+class DeploymentCommandsTests(unittest.TestCase):
+    """Run the deployment guards against real files with synthetic root ownership."""
+
+    def setUp(self):
+        workspace = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="buzz-root-files-")))
+        operator = Store(workspace / "operator")
+        self.source_dir = operator.root / ".deployment-fixture"
+        self.source_dir.mkdir(mode=0o700)
+        self.source = self.source_dir / "prompt"
+        atomic(self.source, b"synthetic approved")
+        self.base = workspace / "system"
+        self.base.mkdir(mode=0o755)
+        self.root = self.base / "buzz-server" / "fixture.service"
+        self.unit = self.base / "fixture.service"
+        self.target = self.root / "prompt-0" / "prompt"
+        self.staged = self.target.with_name(".prompt.stage")
+        binding = SimpleNamespace(id="fixture", service=self.unit.name, uid=20001, gid=20001,
+                                  home="/home/fixture", data="/home/fixture/data")
+        self.commands = Commands(SimpleNamespace(root=operator.root, revalidate=Mock()), binding)
+        self.enterContext(patch.object(Commands, "deployment_root", new_callable=PropertyMock, return_value=self.root))
+        self.enterContext(patch.object(Commands, "unit_path", new_callable=PropertyMock, return_value=self.unit))
+        original = Path.lstat
+        self.owners = {}
+
+        def lstat(path):
+            info = original(path)
+            if path in self.base.parents:
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+            if path == self.base or self.base in path.parents:
+                uid, gid = self.owners.get(path, (0, 0))
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=uid, st_gid=gid, st_nlink=info.st_nlink)
+            return info
+
+        self.enterContext(patch.object(Path, "lstat", lstat))
+        self.run = self.enterContext(patch("buzz_server.account_commands.run", side_effect=self.run_fixed))
+
+    def run_fixed(self, argv, **kwargs):
+        self.assertEqual(argv[:3], ["/usr/bin/sudo", "--non-interactive", "--"])
+        tool, *args, destination = argv[3:]
+        path = Path(destination)
+        self.assertTrue(self.base in path.parents or path == self.base)
+        result = 0
+        if tool == "/usr/bin/install":
+            mode = int(args[args.index("-m") + 1], 8)
+            if args[0] == "-d":
+                path.mkdir(mode=mode)
+            else:
+                shutil.copyfile(args[-1], path)
+                path.chmod(mode)
+        elif tool == "/usr/bin/cmp":
+            self.assertIsNone(kwargs["input"])
+            result = int(Path(args[-1]).read_bytes() != path.read_bytes())
+        elif tool == "/usr/bin/mv":
+            Path(args[-1]).replace(path)
+        elif tool == "/usr/bin/rm":
+            path.unlink()
+        else:
+            self.assertEqual(tool, "/usr/bin/sync")
+        return SimpleNamespace(returncode=result, stdout=b"", stderr=b"")
+
+    def stage(self):
+        self.commands.stage_deployment(0, {"prompt": self.source}, prompt=True)
+
+    def test_stage_uses_fixed_tools_and_compares_before_publication(self):
+        self.stage()
+        self.assertEqual(self.target.read_bytes(), b"synthetic approved")
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o600)
+        self.assertFalse(self.staged.exists())
+        effects = [call.args[0][3:] for call in self.run.call_args_list]
+        directories = [self.root.parent, self.root, self.target.parent]
+        self.assertEqual(effects, [
+            *[["/usr/bin/install", "-d", "-o", "0", "-g", "0", "-m", "0755", "--", str(p)] for p in directories],
+            ["/usr/bin/install", "-T", "-o", "0", "-g", "0", "-m", "0600", "--", str(self.source), str(self.staged)],
+            ["/usr/bin/cmp", "--silent", "--", str(self.source), str(self.staged)],
+            ["/usr/bin/mv", "-T", "--", str(self.staged), str(self.target)],
+            ["/usr/bin/sync", "-f", "--", str(self.target.parent)],
+        ])
+        self.assertTrue(self.commands.prompt_matches(0, self.source))
+        atomic(self.source, b"synthetic edited")
+        self.assertFalse(self.commands.prompt_matches(0, self.source))
+        self.assertEqual(self.run.call_args.args[0][3:], ["/usr/bin/cmp", "--silent", "--", str(self.source), str(self.target)])
+
+    def test_slot_tampering_refuses_before_system_effects(self):
+        self.stage()
+        self.run.reset_mock()
+        self.target.chmod(0o644)
+        with self.assertRaises(Error):
+            self.stage()
+        self.target.chmod(0o600)
+        self.owners[self.target] = (0, 1000)
+        with self.assertRaises(Error):
+            self.commands.prompt_matches(0, self.source)
+        self.owners.clear()
+        hardlink = self.target.with_name("extra-link")
+        hardlink.hardlink_to(self.target)
+        with self.assertRaises(Error):
+            self.stage()
+        hardlink.unlink()
+        self.staged.symlink_to(self.target)
+        with self.assertRaises(Error):
+            self.stage()
+        self.staged.unlink()
+        self.target.parent.chmod(0o775)
+        with self.assertRaises(Error):
+            self.stage()
+        self.run.assert_not_called()
+
+    def test_replacement_checks_real_unit_content_and_rejects_a_symlink(self):
+        supervisor = AccountSystemd(self.commands)
+        self.unit.write_bytes(supervisor.content())
+        self.unit.chmod(0o644)
+        self.assertTrue(supervisor.replacement_installed())
+        self.unit.write_bytes(supervisor.content() + b"\n")
+        self.assertFalse(supervisor.replacement_installed())
+        other = self.unit.with_name("foreign.service")
+        self.unit.rename(other)
+        self.unit.symlink_to(other)
+        with self.assertRaises(Error):
+            supervisor.replacement_installed()
+        self.run.assert_not_called()
 
 
 class AccountTests(unittest.TestCase):

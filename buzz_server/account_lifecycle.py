@@ -14,12 +14,14 @@ import time
 from . import config, dependencies, worker_payload
 from .accounts import Bindings
 from .account_commands import Commands
+from .account_deployment import Deployment, SUFFIX as DEPLOYMENT_SUFFIX
 from .account_supervisor import AccountSystemd
 from .errors import Error
 from .runtime import STARTUP_EXIT
 from .storage import read_json, read_private, write_json
 
 
+RECORD_SUFFIXES = (".agent.json", ".unit-operation.json", DEPLOYMENT_SUFFIX)
 STARTUP_ACTIONS = {
     "local_setup": "Check the dedicated worker prerequisites and agent configuration.",
     "profile_unconfirmed": "Check the relay URL, connectivity and admission for the printed Buzz identity.",
@@ -87,14 +89,14 @@ def require_detached(store):
         if not paths and not sources:
             return
         bindings.trusted_layout()
-        ids = {p.stem for p in paths if not p.name.endswith((".agent.json", ".unit-operation.json"))}
+        ids = {p.stem for p in paths if not p.name.endswith(RECORD_SUFFIXES)}
         if any(p.stem not in ids for p in sources):
             raise ValueError()
         # Orphan lifecycle/journal files cannot make uninstall appear safe.
         for path in paths:
-            ident = path.name.removesuffix(".agent.json").removesuffix(".unit-operation.json")
-            if path.name.endswith((".agent.json", ".unit-operation.json")) and ident not in ids:
-                raise ValueError()
+            for suffix in RECORD_SUFFIXES:
+                if path.name.endswith(suffix) and path.name.removesuffix(suffix) not in ids:
+                    raise ValueError()
         for ident in sorted(ids):
             binding = bindings.load(ident)
             doc = load(bindings, ident)
@@ -112,6 +114,8 @@ class Lifecycle:
         self.binding = binding
         self.commands = Commands(self.bindings, binding, interactive=interactive)
         self.supervisor = AccountSystemd(self.commands)
+        self.deployment = Deployment(self)
+        self.deployment.select()
 
     def save(self, doc):
         write_json(manifest_path(self.bindings, self.binding.id), doc)
@@ -122,7 +126,10 @@ class Lifecycle:
         # Private prompts/configuration travel on stdin, never process argv.
         request_source = repr(request or {}) if terminal or operation == "install" else "json.loads(sys.stdin.buffer.read(131073))"
         program = (worker_payload.source("account_target") + "\nBINDING = " + repr(self.binding.document()) +
-                   "\nOPERATION = " + repr(operation) + "\nREQUEST = " + request_source + "\nmain()\n")
+                   "\nOPERATION = " + repr(operation) + "\nREQUEST = " + request_source)
+        if self.supervisor.payload is not None:
+            program += "\nPAYLOAD = Path(" + repr(str(self.supervisor.payload)) + ")"
+        program += "\nmain()\n"
         raw_request = None if terminal or operation == "install" else json.dumps(request or {}, ensure_ascii=False).encode()
         result = self.commands.target(program, input=raw_request, stdin=stdin, terminal=terminal)
         if terminal:
@@ -265,6 +272,7 @@ class Lifecycle:
                           else "waiting" if service == "activating" else None)}
 
     def view(self, doc, state=None):
+        self.deployment.guard(None)
         state = self.supervisor.inspect() if state is None else state
         startup = self.startup(state)
         return {"id": doc["id"], "identity": doc["identity"], "revision": doc["revision"],
@@ -273,15 +281,17 @@ class Lifecycle:
                 "service_account": {"uid": self.binding.uid, "name": self.binding.account},
                 "configuration": {"harness": "goose", "provider": "goose-managed", "model": None,
                                   "profile_configured": True, "prompt_configured": True},
-                "unit": self.binding.service, "service_scope": "system", "phase": doc["phase"]}
+                "unit": self.binding.service, "service_scope": "system", "phase": doc["phase"],
+                "deployment": self.deployment.report(startup["local_runtime"] == "ready")}
 
     def desired(self, doc, value):
         doc["desired"] = value
         self.save(doc)
         self.target("desired", {"identity": doc["identity"], "desired": value})
 
-    def start(self, doc):
+    def start(self, doc, *, report=True):
         self.supervisor.inspect()
+        self.deployment.validate(self.supervisor)
         self.desired(doc, "running")
         self.commands.progress("Asking systemd to start the service and waiting for startup.")
         self.supervisor.start()
@@ -289,7 +299,7 @@ class Lifecycle:
         while True:
             state = self.supervisor.inspect()
             if state["ActiveState"] == "active" and int(state["MainPID"]) > 1 and state["UnitFileState"] == "enabled":
-                return self.view(doc, state)
+                return self.view(doc, state) if report else None
             if state["Type"] == "notify" and state["ActiveState"] == "failed":
                 report = self.startup(state)
                 stage = report["failure_stage"]
@@ -313,6 +323,12 @@ class Lifecycle:
 
     def execute(self, args, doc):
         op = args.operation
+        if op in {"worker", "prompt"}:
+            return self.deployment.change(args, doc, op + " " + args.deployment_operation)
+        if op == "stop" and self.deployment.record and self.deployment.record["pending"]:
+            self.commands.authenticate()
+            return self.deployment.stop_pending(doc)
+        self.deployment.guard(None)
         if op in {"show", "status"}:
             return self.view(doc)
         if op == "start":
