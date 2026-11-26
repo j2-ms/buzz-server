@@ -14,7 +14,7 @@ Operators who run Buzz agents on a headless Linux host should be able to manage 
 2. In **Create Agent**, I select the host as the **Run Target**. The **Connection Test** is the first visible sign of success: the selected host is reachable and the client can talk to Buzz Server. It does not yet prove that an agent can reply.
 3. I create the agent. I choose the harness and inference provider, set up provider access, and set the system prompt, profile, and avatar. The host starts the agent and runs it independently of Desktop.
 4. I close the first Desktop client. From Buzz Mobile, I mention the agent and it replies. Mobile needs neither SSH nor the plugin.
-5. I connect a second authorised Desktop client to the same host. It shows the existing agent without importing anything from the first client. I change its profile, for example, verify the change in Buzz, and get another reply on Mobile. If I then delete the agent, it stops running on the host. Merely removing its entry from the second client would not count as deletion.
+5. I connect a second authorized Desktop client to the same host. It shows the existing agent without importing anything from the first client. I change its profile, for example, verify the change in Buzz, and get another reply on Mobile. If I then delete the agent, it stops running on the host. Merely removing its entry from the second client would not count as deletion.
 
 The **host** is the source of truth for the management state of its remote agents. Buzz remains the platform for agent identity, published profiles, and messages. A Desktop client may need its own connection settings, but must not hold the only copy of any management state. To meet the acceptance criteria, agents must reply without the original Desktop client and between management operations. Restarts need not be seamless, and a deleted agent must not reply.
 
@@ -30,7 +30,7 @@ An operator should have the option to assign an agent its own unprivileged Linux
 
 A future version should let me move a local agent entirely to a remote host. Afterwards I still talk to **the same agent**: the same Buzz identity and profile, configuration, memory, saved sessions, and working files. The credentials and dependencies needed to keep it running must also be available at the destination. Not every secret will be exportable: when a provider requires a fresh sign-in, the move must tell me instead of silently losing state or access.
 
-A move transfers operation; it does not create a clone. The source and destination must never run an agent under the same identity at the same time. The destination host must show that it has taken over successfully. If the move fails, I should be able to return to running the agent locally. Which harnesses to support, which state formats are portable, and how to handle a turn still in progress remain open.
+A move transfers operation; it does not create a clone. The source and destination must never run an agent under the same identity at the same time. The destination host must demonstrate that it has taken over successfully. If the move fails, I should be able to return to running the agent locally. Which harnesses to support, which state formats are portable, and how to handle a turn still in progress remain open.
 
 ## Proposed scope for the first version
 
@@ -42,6 +42,6 @@ A move transfers operation; it does not create a clone. The source and destinati
 
 Buzz Server is an independent product, not a fork of Buzz Desktop. [Buzz PR #3449](https://github.com/block/buzz/pull/3449) is a reference for target selection and host checks, not a codebase or prerequisite. Its description specifies a read-only remote server view and no undeploy operation in v1 of the provider protocol. For the plugin, we will check which supported extension points cover the required operations. If one is missing, a small change to Buzz Desktop is an option to discuss with its maintainers before contributing it. The CLI remains independent of that work.
 
-Decide before implementation: How are operator permissions checked? Which credentials stay on the host and which must be set up again at the destination? What does deletion remove irreversibly, and what is retained? With which harness can we first demonstrate a complete, safe move?
+Decide before implementation: How are operator permissions checked? Which credentials stay on the host and which must be set up again at the destination? What does deletion remove irreversibly, and what is retained? For which harness can we reliably demonstrate the first complete move?
 
 See [Ubiquitous Language](UBIQUITOUS_LANGUAGE.md).
