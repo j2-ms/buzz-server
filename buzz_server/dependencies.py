@@ -270,6 +270,60 @@ def interactive():
     return all(s.isatty() for s in (sys.stdin, sys.stdout, sys.stderr))
 
 
+def stage_pins(directory, *, show_progress=False):
+    supported()
+    try:
+        for package in PACKAGES:
+            with tempfile.TemporaryDirectory(dir=directory) as temp:
+                source = Path(temp)
+                acquire(package, source, show_progress=show_progress)
+                for name, _ in package["members"].values():
+                    os.replace(source / name, directory / name)
+    except (OSError, ValueError, EOFError, tarfile.TarError, zlib.error, subprocess.SubprocessError):
+        refused()
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def refresh(store, *, structured):
+    """Replace the private set as a whole, keeping existing executable paths."""
+    import ctypes
+
+    with store.lock():
+        destination = bin_dir(store.root)
+        tools = private_dir(destination.parent)
+        sync_directory(store.root)
+        clear_abandoned_stages(tools)
+        with tempfile.TemporaryDirectory(prefix=STAGE_PREFIX, dir=tools) as temp:
+            candidate = private_dir(Path(temp) / "bin")
+            stage_pins(candidate, show_progress=not structured and interactive())
+            sync_directory(candidate)
+            if destination.exists():
+                # renameat2(RENAME_EXCHANGE) makes both names change in one
+                # operation. A filesystem without exchange support fails
+                # before disturbing the active set.
+                try:
+                    exchange = ctypes.CDLL(None, use_errno=True).renameat2
+                except AttributeError:
+                    refused()
+                exchange.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+                exchange.restype = ctypes.c_int
+                if exchange(-100, os.fsencode(candidate), -100, os.fsencode(destination), 2):
+                    refused()
+            else:
+                os.replace(candidate, destination)
+            sync_directory(tools)
+        return {"dependencies_refreshed": list(NAMES),
+                "managed_tool_paths": {name: str(destination / name) for name in NAMES},
+                "runtime_tool_paths": paths(store.root), "workers_restarted": False}
+
+
 def clear_abandoned_stages(tools):
     # Only called inside the Store lock. Every live stage is created and used
     # under that same lock. Restrict cleanup to reserved private stage dirs.

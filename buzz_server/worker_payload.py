@@ -9,14 +9,20 @@ TOOL_FUNCTIONS = ("refused", "bin_dir", "resolve", "child_path")
 TOOL_CONSTANTS = ("SYSTEM_PATH", "NAMES", "FAILURE")
 ENTRY = b'''"""Worker only: no operator management commands."""
 import os
+from pathlib import Path
 import sys
 from buzz_server.storage import Store, agent_id
 from buzz_server.runtime import worker
 if __name__ == "__main__":
     try:
-        if os.getuid() == 0 or len(sys.argv) != 3:
+        if os.getuid() == 0 or len(sys.argv) not in (3, 4):
             sys.exit(1)
-        sys.exit(worker(Store(sys.argv[1]), agent_id(sys.argv[2]), dedicated=True))
+        mode = sys.argv[3] if len(sys.argv) == 4 else None
+        if mode not in (None, "local", "prompt-0", "prompt-1", "prompt-2"):
+            sys.exit(1)
+        tools = Path(sys.argv[0]).parent if mode else None
+        sys.exit(worker(Store(sys.argv[1]), agent_id(sys.argv[2]), dedicated=True,
+                        tools=tools, managed_prompt=mode not in (None, "local")))
     except Exception:
         sys.exit(1)
 '''

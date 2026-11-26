@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import signal
 import socket
+import stat
 import subprocess
 import time
 
@@ -40,7 +41,7 @@ def help_check(path, flags):
         raise Error("unsupported_runtime", "Cannot verify runtime help. Check the installed buzz-acp and buzz executables locally.")
 
 
-def goose_context(store, doc):
+def goose_context(store, doc, *, tools=None):
     """Deterministic per-agent environment shared by setup and ACP; no ambient keys."""
     directory = store.directory(doc["id"])
     work = private_dir(directory / "work")
@@ -50,20 +51,22 @@ def goose_context(store, doc):
     private_dir(config_home)
     private_dir(home / ".local")
     private_dir(data_home)
-    env = {"PATH": dependencies.child_path(store.root), "HOME": str(home),
+    path = str(tools) + ":/usr/bin:/bin" if tools is not None else dependencies.child_path(store.root)
+    env = {"PATH": path, "HOME": str(home),
            "XDG_CONFIG_HOME": str(config_home), "XDG_DATA_HOME": str(data_home),
            "LANG": "C.UTF-8"}
     env["GOOSE_DISABLE_KEYRING"] = "1"
     return env, work
 
 
-def configure_goose(store, doc):
+def configure_goose(store, doc, *, tools=None):
     require_current(doc["config"])
-    env, work = goose_context(store, doc)
+    env, work = goose_context(store, doc, tools=tools)
     for key in ("TERM", "COLORTERM"):
         if key in os.environ:
             env[key] = os.environ[key]
-    command = [executable(doc["config"]["harness"]["command"]), "configure"]
+    goose = tools / "goose" if tools is not None else doc["config"]["harness"]["command"]
+    command = [executable(goose), "configure"]
     child = None
     previous = signal.getsignal(signal.SIGTERM)
 
@@ -100,7 +103,29 @@ def configure_goose(store, doc):
     return {"id": doc["id"], "setup_exited": True, "buzz_response_verified": False}
 
 
-def prepare(store, doc, snapshot=True):
+def credential_prompt():
+    credentials = os.environ.get("CREDENTIALS_DIRECTORY")
+    try:
+        if not credentials or not Path(credentials).is_absolute():
+            raise ValueError()
+        path = Path(credentials) / "prompt"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            # systemd uses a root-owned file with a UID ACL or a UID-owned
+            # file on a read-only mount. The ACL mask may set the group read bit.
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid())
+                    or stat.S_IMODE(info.st_mode) not in (0o400, 0o440)):
+                raise ValueError()
+            prompt = stream.read(65537)
+        if len(prompt) > 65536:
+            raise ValueError()
+        return path, prompt
+    except (OSError, ValueError):
+        raise Error("invalid_config", "The managed prompt credential is unavailable or invalid.") from None
+
+
+def prepare(store, doc, snapshot=True, *, tools=None, managed_prompt=False):
     directory = store.directory(doc["id"])
     c = doc["config"]
     require_current(c)
@@ -110,25 +135,35 @@ def prepare(store, doc, snapshot=True):
     key = read_private(directory / "identity.key", 64).decode("ascii")
     if public(key) != doc["identity"]:
         raise Error("identity_mismatch", "Identity file does not match the managed public identity; restore the correct key before starting.")
-    prompt = read_private(c["prompt_file"], 65536)
+    prompt_path = directory / "prompt.txt"
+    if managed_prompt:
+        # systemd passes a per-unit, read-only credential mount to the worker.
+        # The agent's configuration and writable snapshot never select this path.
+        prompt_path, prompt = credential_prompt()
+    else:
+        prompt = read_private(c["prompt_file"], 65536)
     try:
         prompt.decode("utf-8")
     except UnicodeError:
         raise Error("invalid_config", "Prompt file must be UTF-8 text, at most 64 KiB, owned by the service user with mode 0600.")
-    goose = executable(c["harness"]["command"])
-    acp, buzz = tool("buzz-acp", store.root), tool("buzz", store.root)
+    if tools is None:
+        goose = executable(c["harness"]["command"])
+        acp, buzz = tool("buzz-acp", store.root), tool("buzz", store.root)
+    else:
+        goose, acp, buzz = (executable(tools / name) for name in ("goose", "buzz-acp", "buzz"))
     help_check(acp, ["--system-prompt-file", "--agent-command", "--agent-args", "--model", "--permission-mode", "--respond-to", "--session-title", "--config"])
-    env, work = goose_context(store, doc)
-    if snapshot:
-        atomic(directory / "prompt.txt", prompt)
-    # Empty explicit config prevents ambient buzz-acp.toml from changing execution.
-    if snapshot:
-        atomic(directory / "buzz-acp.toml", b"")
+    env, work = goose_context(store, doc, tools=tools)
+    if snapshot and not managed_prompt:
+        atomic(prompt_path, prompt)
+    # Deployed workers use the packaged empty config from the read-only payload.
+    acp_config = tools / "buzz-acp.toml" if tools is not None else directory / "buzz-acp.toml"
+    if snapshot and tools is None:
+        atomic(acp_config, b"")
     env["BUZZ_PRIVATE_KEY"] = key
     command = [acp, "--relay-url", c["relay_url"], "--agent-owner", c["owner"],
                "--agent-command", goose, "--agent-args", "acp",
-               "--system-prompt-file", str(directory / "prompt.txt"), "--session-title", c["profile"]["name"],
-               "--config", str(directory / "buzz-acp.toml"), "--respond-to", "owner-only", "--permission-mode", "dont-ask"]
+               "--system-prompt-file", str(prompt_path), "--session-title", c["profile"]["name"],
+               "--config", str(acp_config), "--respond-to", "owner-only", "--permission-mode", "dont-ask"]
     # buzz's profile operation is headless; secret goes only through the environment.
     relay = c["relay_url"].replace("wss://", "https://", 1).replace("ws://", "http://", 1)
     profile = [buzz, "--relay", relay, "users", "set-profile", "--name", c["profile"]["name"], "--about", c["profile"]["about"], "--avatar", c["profile"]["avatar"]]
@@ -186,7 +221,7 @@ def notify_startup(status, *, ready=False):
         pass
 
 
-def worker(store, ident, *, dedicated=False):
+def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
     directory = store.directory(ident)
     child = None
     stopping = False
@@ -218,7 +253,7 @@ def worker(store, ident, *, dedicated=False):
             return STARTUP_EXIT["local_setup_refused"] if dedicated else 0
         event(directory, "worker_starting")
         try:
-            command, profile, env, work = prepare(store, doc)
+            command, profile, env, work = prepare(store, doc, tools=tools, managed_prompt=managed_prompt)
         except Error as error:
             if error.code in {"identity_mismatch", "invalid_config", "obsolete_provider", "prerequisite_missing"}:
                 refusal = "local_setup_refused"

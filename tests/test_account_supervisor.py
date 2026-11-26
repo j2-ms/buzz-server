@@ -22,6 +22,7 @@ class FakeCommands:
         self.files = {}
         self.effects = []
         self.loaded = False
+        self.loaded_definition = b""
         self.enabled = False
         self.active = False
         self.overrides = {}
@@ -36,6 +37,7 @@ class FakeCommands:
     def show(self, properties):
         if not self.loaded:
             return b"LoadState=not-found\nDropInPaths=\nFragmentPath=\nActiveState=inactive\nMainPID=0\nControlGroup=\n"
+        definition = dict(line.split("=", 1) for line in self.loaded_definition.decode().splitlines() if "=" in line)
         s = {p: "" for p in properties}
         s.update(Id=self.binding.service, LoadState="loaded", ActiveState="active" if self.active else "inactive",
                  SubState="running" if self.active else "dead", MainPID="23" if self.active else "0",
@@ -44,7 +46,7 @@ class FakeCommands:
                  Group=str(self.binding.gid), WorkingDirectory="/", NoNewPrivileges="yes",
                  Type="notify", NotifyAccess="main",
                  Environment="PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + self.binding.home,
-                 ExecStart="{ path=/usr/bin/python3 ; argv[]=" + " ".join(self.supervisor.argv) +
+                 ExecStart="{ path=/usr/bin/python3 ; argv[]=" + definition["ExecStart"].removeprefix(":") +
                            " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }")
         s.update(self.overrides)
         # systemctl 255's structured-array printer emits no line for an
@@ -58,6 +60,7 @@ class FakeCommands:
     def reload(self):
         self.effect("reload")
         self.loaded = self.unit_path in self.files
+        self.loaded_definition = self.files.get(self.unit_path, b"")
 
     def control(self, operation):
         self.effect(operation)
@@ -79,6 +82,10 @@ class FakeCommands:
         if self.unit_path in self.files:
             raise Error("collision", "Synthetic collision")
         self.files[self.unit_path] = self.files[self.stage_path]
+
+    def replace_unit(self):
+        self.effect("replace")
+        self.files[self.unit_path] = self.files.pop(self.stage_path)
 
     def unlink_unit(self, stage=False):
         self.effect("unlink-stage" if stage else "unlink-unit")

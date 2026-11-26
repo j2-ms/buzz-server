@@ -34,6 +34,12 @@ jobs:
         run: |
           test "$(id -u)" != 0
           /usr/bin/python3 -B -m unittest discover -s tests -v
+      - name: Check systemd credential delivery on the disposable runner
+        env:
+          BUZZ_SERVER_TEST_SYSTEM_CREDENTIALS: "1"
+        run: |
+          test "$(id -u)" != 0
+          PYTHONPATH=tests /usr/bin/python3 -B -m unittest test_worker_payload.WorkerPayloadTests.test_packaged_reader_accepts_real_systemd_credential -v
       - name: Verify release build and version agreement
         run: |
           stage=$(mktemp -d "$RUNNER_TEMP/buzz-release.XXXXXXXX")

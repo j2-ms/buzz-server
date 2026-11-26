@@ -676,7 +676,8 @@ def binding(m, state, units):
 def before_command(prefix, operation, structured, tty, state, units, argv, now=None):
     """Offer one exact release before dispatch, with no lock across human/network I/O."""
     if (prefix is None or structured or not tty or os.getuid() == 0 or
-            operation in ('update', 'install', 'uninstall', '_worker', 'account-plan', 'version')):
+            operation in ('update', 'install', 'uninstall', '_worker', 'account-plan', 'version',
+                          'worker', 'prompt', 'dependencies')):
         return
     path = None
     committed = False

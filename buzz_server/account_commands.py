@@ -4,6 +4,8 @@ This module does not accept command strings, environment overrides, tool paths
 or service names supplied by the target. Every effect revalidates the private
 operator binding immediately before invoking an ordinary explicit sudo command.
 """
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,7 @@ from .account_process import run
 
 
 CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+PAYLOAD_MODES = {"worker.pyz": 0o644, "buzz-acp.toml": 0o644, "buzz": 0o755, "buzz-acp": 0o755, "goose": 0o755}
 
 
 class Commands:
@@ -94,6 +97,76 @@ class Commands:
         # link(2) refuses an existing destination and publishes complete bytes.
         return self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/ln", "-T", "--",
                           str(self.stage_path), str(self.unit_path)])
+
+    def replace_unit(self):
+        self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/mv", "-T", "--",
+                   str(self.stage_path), str(self.unit_path)])
+
+    @property
+    def deployment_root(self):
+        return Path("/var/lib/buzz-server") / self.binding.service
+
+    def stage_deployment(self, slot, files, *, prompt=False):
+        from .account_supervisor import conflict
+        if type(slot) is not int or slot not in (0, 1, 2):
+            raise ValueError("invalid deployment slot")
+        modes = {"prompt": 0o600} if prompt else PAYLOAD_MODES
+        if set(files) != set(modes):
+            raise ValueError("invalid deployment files")
+        directory = self.deployment_root / (("prompt-" if prompt else "worker-") + str(slot))
+        for path in (*reversed(directory.parents), directory):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                if path not in (self.deployment_root.parent, self.deployment_root, directory):
+                    conflict()
+                self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/install",
+                           "-d", "-o", "0", "-g", "0", "-m", "0755", "--", str(path)])
+                info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+                conflict()
+        for name, source in files.items():
+            # The source is created by the operator under the validated binding root.
+            source = Path(source)
+            if (source.name != name or source.parent.parent != self.bindings.root
+                    or not source.parent.name.startswith(".deployment-")):
+                raise ValueError("unbound deployment source")
+            parent = source.parent.lstat()
+            if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700:
+                conflict()
+            info = source.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                conflict()
+            mode = modes[name]
+            target = directory / name
+            stage = directory / ("." + name + ".stage")
+            if target.exists() or target.is_symlink():
+                self.deployment_file(target, mode)
+            if stage.exists() or stage.is_symlink():
+                self.deployment_file(stage, 0o600, mode)
+                self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/rm", "--", str(stage)])
+            self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/install",
+                       "-T", "-o", "0", "-g", "0", "-m", format(mode, "04o"), "--", str(source), str(stage)])
+            self.deployment_file(stage, mode)
+            self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/cmp",
+                       "--silent", "--", str(source), str(stage)])
+            self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/mv", "-T", "--",
+                       str(stage), str(target)])
+        self.sync(directory)
+
+    def sync(self, path):
+        self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/sync", "-f", "--", str(path)])
+
+    def deployment_file(self, path, *modes):
+        from .account_supervisor import conflict
+        for parent in path.parents:
+            info = parent.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+                conflict()
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) not in modes):
+            conflict()
 
     def unlink_unit(self, *, stage=False):
         path = self.stage_path if stage else self.unit_path

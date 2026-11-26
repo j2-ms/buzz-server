@@ -15,6 +15,9 @@ import struct
 import sys
 
 
+PAYLOAD = None
+
+
 def require(value):
     if not value:
         raise ValueError("unsafe target layout or request")
@@ -109,7 +112,8 @@ def install():
 
 
 def modules():
-    sys.path.insert(0, BINDING["data"] + "/worker.pyz")
+    path = str(PAYLOAD / "worker.pyz") if PAYLOAD is not None else BINDING["data"] + "/worker.pyz"
+    sys.path.insert(0, path)
     from buzz_server.storage import Store
     return Store(Path(BINDING["data"]) / "state")
 
@@ -151,7 +155,10 @@ def apply():
         if REQUEST.get("identity") is not None:
             require(doc["identity"] == REQUEST["identity"])
         atomic(root / "user-prompt.txt", REQUEST["prompt"].encode("utf-8"))
-        prepare(store, doc, snapshot=False)
+        if PAYLOAD is None:
+            prepare(store, doc, snapshot=False)
+        else:
+            prepare(store, doc, snapshot=False, tools=PAYLOAD)
         store.save(doc)
     return {"identity": doc["identity"], "revision": doc["revision"]}
 
@@ -182,7 +189,7 @@ def operation():
         elif OPERATION == "inference":
             require(doc["desired"] == "stopped")
             from buzz_server.runtime import configure_goose
-            return configure_goose(store, doc)
+            return configure_goose(store, doc) if PAYLOAD is None else configure_goose(store, doc, tools=PAYLOAD)
         elif OPERATION == "delete":
             (store.directory(BINDING["id"]) / "definition.json").unlink()
         else:

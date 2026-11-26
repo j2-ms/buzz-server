@@ -55,10 +55,11 @@ Follow the quickstart to
 agent, then [add it to a channel and check a reply](docs/quickstart.md#first-reply).
 For a custom OpenAI-compatible endpoint, see [Goose provider setup](docs/quickstart.md#custom-openai-compatible-endpoint).
 
-See the [account guide](docs/service-accounts.md) for isolation, retained data and
-same-account use; the [release guide](docs/releases.md) for installer verification,
-automation and recovery; and [Contributing](CONTRIBUTING.md) and [Vision](VISION.md)
-for development and future scope.
+See the [account guide](docs/service-accounts.md) for isolation, retained data,
+[worker upgrades and approved prompts](docs/service-accounts.md#maintain-an-existing-agent).
+See the [release guide](docs/releases.md) for installer verification, automation
+and recovery, and [Contributing](CONTRIBUTING.md) and [Vision](VISION.md) for
+development and future scope.
 
 ## License and upstream tools
 
