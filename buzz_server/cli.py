@@ -10,7 +10,7 @@ import sys
 
 from . import __version__, config, release, dependencies
 from .errors import Error
-from .identity import generate
+from .identity import generate, operator_public_key
 from .runtime import configure_goose, prepare
 from .storage import Store, agent_id, atomic, private_dir, read_json, read_private
 from .supervisor import PreexistingUnit, Systemd
@@ -114,7 +114,8 @@ def execute(args):
     if args.operation == "account-plan":
         return account_plan(args.account)
     if args.operation == "install":
-        data = release.install(Path(sys.argv[0]).absolute(), args.prefix, args.state_dir, args.unit_dir)
+        data = release.install(Path(sys.argv[0]).absolute(), args.prefix, args.state_dir, args.unit_dir,
+                               offer_repair=not args.json and dependencies.interactive())
         result = dependencies.install(Store(args.state_dir), opted=args.install_dependencies,
                                       skip=args.skip_dependencies, structured=args.json)
         return {**data, **result}
@@ -339,7 +340,11 @@ def guided_create(ident, directory, root, dedicated=None):
     name = ask("Agent name", ident)
     about = ask("Profile description (optional)", "")
     avatar = ask("Avatar HTTPS URL (optional)", "")
-    owner = ask("Operator Buzz public key (64 lowercase hex characters)")
+    while True:
+        owner = operator_public_key(ask("Operator Buzz public key (64 lowercase hex characters or npub)"))
+        if owner is not None:
+            break
+        print("Enter a valid public key in lowercase hex (64 characters) or npub format.", file=sys.stderr)
     relay = ask("Relay URL (wss://)")
     prompt = ask("System prompt (single line)", "You are a helpful assistant.")
     if len(prompt.encode("utf-8")) > 65536:
@@ -383,15 +388,31 @@ def render(operation, data):
     if operation == "list":
         if not data["agents"]:
             return "No managed agents."
-        return "\n".join(f"{a['id']}  {a['service_state']}  desired={a['desired']}  identity={a['identity']}" for a in data["agents"])
+        return "\n".join(f"{a['id']}  observed {a['service_state']}  operator requested {a['desired']}  identity={a['identity']}" for a in data["agents"])
     if operation == "logs":
         return "\n".join(f"{e['time']} {e['event']}" for e in data["events"]) or "No lifecycle events yet."
+    if operation == "doctor" and "service_account" in data:
+        name = data["service_account"]["name"]
+        return (f"Dedicated-account preflight passed for {name}. Account layout and system manager reachability verified.\n"
+                f"Next, run buzz-server create AGENT --account {name} and follow docs/quickstart.md.")
     if "service_state" in data:
-        return (f"{data['id']}: {data['service_state']} (desired {data['desired']}, revision {data['revision']})\n"
-                f"Buzz identity: {data['identity']}\nService account: {data['service_account']['name']}\n"
-                f"Runtime process verified: {str(data['runtime_started']).lower()}; Buzz response unverified")
+        heading = (f"{data['id']}: created and left stopped." if operation == "create" else
+                   f"{data['id']}: systemd reports {data['service_state']}; operator requested {data['desired']}.")
+        lines = [heading, f"Buzz identity: {data['identity']}", f"Service account: {data['service_account']['name']}"]
+        if operation == "create":
+            lines.append(f"Next, run buzz-server inference configure {data['id']}. Follow docs/quickstart.md for relay admission before first start.")
+        elif "startup" in data:
+            from .account_lifecycle import render_startup
+            lines.extend(render_startup(data))
+        else:
+            lines.append("Local runtime process observed." if data["runtime_started"] else "Local runtime readiness unverified.")
+            lines.append("Buzz reply untested. See First reply in docs/quickstart.md.")
+        return "\n".join(lines)
     if operation == "inference":
-        return f"{data['id']}: Goose setup exited. Buzz reply remains unverified."
+        return (f"{data['id']}: Goose exited successfully. A clean exit can also mean setup was cancelled.\n"
+                "Provider access and Buzz replies remain unverified.\n"
+                f"If you completed setup, follow docs/quickstart.md to admit the key if required, start the agent and test a reply.\n"
+                f"If you cancelled, rerun buzz-server inference configure {data['id']}.")
     if operation == "delete":
         return f"{data['id']}: stopped and removed from management. Private data, Linux account and Buzz history retained."
     if operation == "install":
@@ -419,9 +440,10 @@ def main(argv=None):
         operation = args.operation
         prefix = release.location()
         ordinary = operation not in ("install", "update", "uninstall", "version", "account-plan")
-        release.before_command(prefix, operation, structured,
-                               sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty(),
-                               args.state_dir, args.unit_dir, argv)
+        if operation != "doctor" or not args.account:
+            release.before_command(prefix, operation, structured,
+                                   sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty(),
+                                   args.state_dir, args.unit_dir, argv)
         guard = release.locked(prefix, shared=True) if prefix and ordinary else contextlib.nullcontext()
         with guard:
             if prefix and ordinary:

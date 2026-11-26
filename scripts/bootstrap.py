@@ -266,13 +266,19 @@ def main(argv=None):
             raise Refused('Install Python 3.12+ before running this installer.')
         if os.getuid() == 0:
             raise Refused('Run this installer as the existing unprivileged install account.')
-        with tempfile.TemporaryDirectory(prefix='buzz-first-install-') as temp:
+        with terminal(args) as (stdin, interactive), tempfile.TemporaryDirectory(prefix='buzz-first-install-') as temp:
             directory = Path(temp)
             metadata = directory / 'metadata.json'
+            if interactive:
+                print('Checking the public Buzz Server release.', file=sys.stderr, flush=True)
             fetch(API_URL, metadata, 1024 * 1024)
             selected = candidate(json.loads(metadata.read_bytes()))
             artifact = directory / ASSET
+            if interactive:
+                print(f"Downloading Buzz Server {selected['version']}.", file=sys.stderr, flush=True)
             fetch(binary_url(selected['version']), artifact, selected['size'])
+            if interactive:
+                print('Verifying the installer payload.', file=sys.stderr, flush=True)
             verify(artifact, selected)
             command = ['/usr/bin/python3', '-I', str(artifact)]
             if args.json:
@@ -287,10 +293,9 @@ def main(argv=None):
             # handles state binding and per-step limits. Do not time a user's
             # decision at the consent prompt with the noninteractive deadline.
             try:
-                with terminal(args) as (stdin, interactive):
-                    result = subprocess.run(command, stdin=stdin,
-                                            env=environment(Path.home()), cwd=directory,
-                                            timeout=None if interactive else 600)
+                result = subprocess.run(command, stdin=stdin,
+                                        env=environment(Path.home()), cwd=directory,
+                                        timeout=None if interactive else 600)
                 if result.returncode >= 0:
                     return result.returncode
             except (subprocess.TimeoutExpired, KeyboardInterrupt):

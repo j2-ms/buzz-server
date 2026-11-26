@@ -1,8 +1,9 @@
 #!/usr/bin/python3
-"""Disposable loopback-only HTTP/Nostr transport. Not a real Buzz relay.
+"""Disposable loopback-only HTTP/Nostr transport.
 
 Accepts profile publication; exercises AUTH and acknowledges EVENT and REQ.
-No inference, message routing, auth or signature validation is claimed.
+Optional restricted mode gates profile writes by a fixture admission file.
+It does not implement inference, message routing or signature validation.
 """
 import base64
 import hashlib
@@ -48,7 +49,7 @@ class Relay(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.root = root
         self.guard = threading.Lock()
-        self.counts = {"profile_posts": 0, "websockets": 0, "subscriptions": 0}
+        self.counts = {"profile_attempts": 0, "profile_posts": 0, "websockets": 0, "subscriptions": 0}
 
     def count(self, key):
         with self.guard:
@@ -84,9 +85,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         body = json.loads(self.rfile.read(length))
+        root = cast(Relay, self.server).root
+        profile = root / "profile.json"
         if self.path == "/query" and isinstance(body, list):
-            self.reply([])
+            event = json.loads(profile.read_text()) if profile.exists() else None
+            self.reply([event] if event and any(event["pubkey"] in f.get("authors", []) for f in body) else [])
         elif self.path == "/events" and isinstance(body, dict) and body.get("kind") == 0 and isinstance(body.get("id"), str):
+            self.server.count("profile_attempts")
+            if (root / "restricted").exists():
+                member = root / "admitted-pubkey"
+                if not member.exists() or body.get("pubkey") != member.read_text():
+                    self.reply({"accepted": False, "message": "restricted: synthetic membership gate", "event_id": body["id"]})
+                    return
+                if (root / "unconfirmed").exists():
+                    self.reply({"accepted": False, "message": "synthetic ambiguous rejection", "event_id": body["id"]})
+                    return
+                if (root / "transient").exists():
+                    (root / "transient").unlink()
+                    self.reply({"accepted": False, "message": "synthetic transient rejection", "event_id": body["id"]})
+                    return
+                temporary = profile.with_suffix(".next")
+                temporary.write_text(json.dumps(body))
+                temporary.replace(profile)
             self.server.count("profile_posts")
             self.reply({"accepted": True, "message": "", "id": body["id"]})
         else:

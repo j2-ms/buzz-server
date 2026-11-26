@@ -56,6 +56,13 @@ stderr envelope and suppresses prose. The installed CLI serializes mutations
 with its existing prefix lock; a failed download never activates code. Retry the
 same prefix and directory arguments after interruption.
 
+For a standard installation, your home, `~/.local` and `~/.local/bin` must be
+real directories owned by you and free of group and other write bits. During
+an interactive install, Buzz Server can remove just those two write bits from
+an otherwise valid `~/.local/bin` after you approve the exact path and mode
+change. Declining preserves the directory and prints the scoped command for
+manual correction.
+
 The interactive consent prompt has no bootstrap time limit; downloads and probes
 have their own limits. The noninteractive bootstrap gives the verified installer
 10 minutes. If it times out, Buzz Server may already be installed. Retry the
@@ -87,7 +94,7 @@ an already verified local artifact:
 ```
 
 Use the original `--state-dir` and `--unit-dir` global arguments when customized.
-Managed downloads refuse root and allow **Ubuntu 24.04 and 26.04 amd64**. Pinned binary compatibility on 26.04 has not been tested. On
+Managed downloads refuse root and allow **Ubuntu 24.04 and 26.04 amd64**. On
 compatible other Linux hosts, install compatible upstream tools manually in
 `/usr/local/bin`, `/usr/bin` or `/bin`. No ambient PATH is searched. Existing system
 tools take precedence, then private tools in the installation's bound

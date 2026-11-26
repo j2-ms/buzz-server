@@ -16,7 +16,7 @@ if __name__ == "__main__":
     try:
         if os.getuid() == 0 or len(sys.argv) != 3:
             sys.exit(1)
-        sys.exit(worker(Store(sys.argv[1]), agent_id(sys.argv[2])))
+        sys.exit(worker(Store(sys.argv[1]), agent_id(sys.argv[2]), dedicated=True))
     except Exception:
         sys.exit(1)
 '''

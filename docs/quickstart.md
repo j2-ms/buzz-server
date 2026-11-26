@@ -20,14 +20,13 @@ Buzz Server does not produce it. Do not change relay policy just to run the
 quickstart. Use `wss://`; plain `ws://` is only allowed for literal loopback
 addresses.
 
-On a machine where you already use Buzz as the intended owner, run `buzz users get`
-with that identity against the same relay. Copy `pubkey` from your returned
-profile: 64 lowercase hex characters, not an `npub` or `nsec`. If no profile is
-returned, confirm the configured identity and relay, or obtain the hex public
-key from your Buzz client or relay operator. Never transfer your private key to
-the server to perform this step.
+On a machine where you already use Buzz as the intended operator, run
+`buzz users get` with that identity against the same relay. Copy `pubkey` from
+your profile, or obtain the public key from your Buzz client. The guided prompt
+accepts 64 lowercase hex characters or a valid `npub`. Keep your private key
+(`nsec`) on your client.
 
-## Configure and start
+## Create and configure
 
 Create a stopped agent from the operator login:
 
@@ -49,7 +48,6 @@ enabled tools without per-call approval, so use it only for an account and
 workspace whose permissions you authorize. Modes that ask at runtime can block
 unattended responses. A cancelled wizard may exit successfully without readiness;
 rerun `buzz-server inference configure assistant` and finish setup before starting.
-Prove readiness with the [First reply](#first-reply) check below.
 
 ### Custom OpenAI-compatible endpoint
 
@@ -63,32 +61,75 @@ your endpoint does not require authentication. Answer **Yes** to advanced
 settings. Set `OPENAI_BASE_URL` to the full API base URL (for example,
 `https://models.example.com/v1`, without `/chat/completions`). Accept the
 `OPENAI_HOST` default and leave `OPENAI_BASE_PATH` blank; the explicit base URL
-takes precedence. Skip organization, project and header settings unless your
-provider requires them. Accept the `OPENAI_TIMEOUT` default, then select your
-model and finish the wizard.
+takes precedence. Leave organization and project blank unless your provider
+requires them. Choose **No** when asked to set `OPENAI_CUSTOM_HEADERS` unless
+your provider needs them. Accept the `OPENAI_TIMEOUT` default, then select
+your model and finish the wizard.
 
-### First reply
+## Admit the key and start
 
-1. Copy the public key from `Buzz identity:` in `buzz-server show assistant`.
-   If the relay requires explicit admission, give its operator that public key.
-2. Add the agent to a test channel in Buzz. Admission and channel membership
-   are separate. If administering the channel with the Buzz CLI, run this from
-   the channel-owner or administrator identity, with the channel UUID and the
-   agent's public key:
+Copy the hex public key printed as `Buzz identity:` in `buzz-server show assistant`.
+On a membership-gated relay, give the administrator this public key and the
+community name before the first start. Ask them to admit it as a regular relay
+member under the existing policy. For example, on a compatible self-hosted
+Buzz relay, the relay administrator can run this in its administrative
+environment for the intended community:
+
+```sh
+buzz-admin add-member --pubkey "$AGENT_PUBKEY" --role member
+```
+
+This command admits the key without joining default channels. Invite claims
+and some other administrator add paths may auto-join channels. Buzz Server
+v0.2.0 and this workflow do not supply owner attestation for a relay that
+requires it.
+
+Start from the Linux operator login. You can do this before choosing a channel:
+
+```sh
+buzz-server start assistant
+buzz-server status assistant
+```
+
+Profile publication, local runtime readiness and a reply are separate checks.
+Relay admission and channel membership let the agent participate. Confirm a
+reply in your thread before relying on it. If startup reports a failure, follow
+its next step and reuse the same key when you retry.
+
+Before adding the agent to a channel, verify its profile against the same
+relay from the operator's Buzz identity:
+
+```sh
+buzz users get --pubkey "$AGENT_PUBKEY"
+```
+
+Check that the returned `pubkey` matches `Buzz identity:` from Buzz Server.
+
+## First reply
+
+1. In Buzz Desktop 0.5.30, select the same community and open your test channel.
+   Open **Channel members**, then search for the existing agent under **Add
+   people and agents** using the display name from the verified profile. It
+   can appear as a regular member. Select **Add** on that result and confirm
+   it appears in the channel members. Use `buzz channels members --channel
+   "$CHANNEL_ID"` to verify the added key against the `Buzz identity:` printed
+   by Buzz Server.
+2. If the agent does not appear, confirm the community, your permission to add
+   members, the exact key's relay admission, and the startup status. Repeat
+   the profile lookup above. Use the CLI alternative if the exact profile is
+   visible but Desktop cannot find it, or if several results have the same
+   name. Use the existing public key for channel membership and keep the
+   private key on the server.
+
+   From the channel owner or administrator identity, with the channel UUID
+   and the agent's public key:
 
    ```sh
    buzz channels add-member --channel "$CHANNEL_ID" --pubkey "$AGENT_PUBKEY" --role bot
    buzz channels members --channel "$CHANNEL_ID"
    ```
 
-3. Start the agent from your Linux operator login:
-
-   ```sh
-   buzz-server start assistant
-   buzz-server status assistant
-   ```
-
-4. From the Buzz identity you gave `create`, mention the agent in the test
+3. From the Buzz identity you gave `create`, mention the agent in the test
    channel and ask it to post a short reply in the same thread. Check that the
    reply comes from the agent you added and is attached to your message. To
    send and check with the Buzz CLI:
@@ -147,7 +188,7 @@ commands retain their behavior. See the [account guide](service-accounts.md).
    buzz-server inference configure assistant
    ```
 
-5. Continue with [First reply](#first-reply).
+5. Continue with [Admit the key and start](#admit-the-key-and-start).
 
 ### If no reply appears
 
@@ -174,7 +215,13 @@ above, do that before sending another mention.
 
 - `list` shows agents bound to this operator and existing same-account agents. `logs` is available for same-account lifecycle events only. For automation put `--json` **before** the subcommand; successes go to stdout and errors to stderr.
 - After editing the JSON or prompt, run `buzz-server configure assistant --config "$config"`. This replaces the full configuration, preserves the agent key, and restarts an agent set to run. An intentionally stopped agent stays stopped. This command does not run Goose setup.
-- `start` enables the dedicated system service (or the same-account user service); `stop` disables it. If `start` cannot verify startup within ten seconds, it leaves the agent set to run and systemd retries after worker failures. Use `buzz-server stop assistant` to cancel retries.
+- `start` enables the service for future boots. A new dedicated service waits
+  for profile publication and a locally running worker. The CLI observes
+  startup for up to ten seconds while systemd can continue trying in the
+  background. Systemd allows four starts in the startup window and stops
+  sooner on a classified refusal. Use `buzz-server status assistant` to see
+  the latest stage, `buzz-server stop assistant` to cancel, or `buzz-server
+  start assistant` after correcting a failure.
 - `buzz-server delete assistant` verifies stop and removes the system unit and target definition. It retains the key, credentials and work under the bound target home, plus the private operator binding/removal proof. The ID stays reserved. It does not remove the Linux account or Buzz history. Same-account retained data stays under `${XDG_DATA_HOME:-$HOME/.local/share}/buzz-server`.
 - Updating or reinstalling the operator CLI does not update staged dedicated workers or tools. There is no fleet upgrade mechanism. Keep the operator state/bindings and do not edit units by hand. CLI uninstall refuses dedicated bindings until delete is verified; incomplete create/delete operations must be retried first. Same-account `start` still refreshes its user unit after a CLI reinstall.
 - Loaded unit overrides are not supported. A conflict blocks management commands, including `stop`, `status`, and `show`, and can make `list` fail even when other agents are unaffected. Shared overrides in `service.d/` or `buzz-server-.service.d/` on the applicable manager's search path can affect every managed agent. Inspect the conflicts with `systemctl --system cat UNIT` using the exact `unit` in JSON status; use `systemctl --user cat buzz-server-<id>.service` for same-account units. Ask the administrator responsible for the override to remove the conflict, reload that manager, and retry `stop` before deleting anything. A failed stop is not proof the agent is down.
@@ -238,4 +285,9 @@ busy. On Ctrl+C or SIGTERM, Buzz Server terminates and reaps the wizard before
 releasing locks, ignoring repeated interrupts during cleanup (five seconds
 before killing an unresponsive child). Do not forcibly kill the managing CLI:
 SIGKILL or a host failure cannot run cleanup, and an orphan wizard must be
-resolved before further management. No account changes are performed. Dedicated service activity is observed through the system manager; status keeps `runtime_started` and `buzz_response_verified` false because service activity alone cannot verify either. No reboot or live dedicated-account verification is claimed by the offline suite.
+resolved before further management. No account changes are performed.
+`runtime_started` for a new dedicated worker reflects its local systemd
+readiness signal after profile publication and a successful local process
+check. Test the reply separately in Buzz. Existing v0.2 dedicated units keep
+their original retry policy and report local readiness as unobserved. No reboot
+or live dedicated-account verification is claimed by the offline suite.

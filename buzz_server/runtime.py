@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import time
 
@@ -10,6 +11,10 @@ from .errors import Error
 from . import dependencies
 from .identity import public
 from .storage import atomic, private_dir, read_private, write_json
+
+
+STARTUP_EXIT = {"profile_unconfirmed": 75, "local_runtime": 76, "local_setup": 77,
+                "local_setup_refused": 78, "profile_refused": 79}
 
 
 def executable(path):
@@ -153,7 +158,35 @@ def profile_accepted(output):
     return isinstance(result, dict) and result.get("accepted") is True
 
 
-def worker(store, ident):
+def profile_refused(output):
+    try:
+        result = json.loads(output)
+    except (ValueError, UnicodeError):
+        return False
+    # Only a structured Nostr write refusal with an explicit policy prefix is
+    # terminal. HTTP errors, generic rejection and missing responses may recur
+    # for unrelated reasons and receive the ordinary retry budget.
+    return (isinstance(result, dict) and result.get("accepted") is False
+            and isinstance(result.get("message"), str)
+            and result["message"].startswith(("blocked: ", "restricted: ", "auth-required: ")))
+
+
+def notify_startup(status, *, ready=False):
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as connection:
+            connection.settimeout(0.5)
+            connection.sendto(("STATUS=buzz-server:" + status + ("\nREADY=1" if ready else "")).encode("ascii"), address)
+    except OSError:
+        # With Type=notify, systemd's startup timer handles an undelivered READY.
+        pass
+
+
+def worker(store, ident, *, dedicated=False):
     directory = store.directory(ident)
     child = None
     stopping = False
@@ -172,15 +205,29 @@ def worker(store, ident):
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    phase = "local_setup"
+    refusal = None
     try:
+        if dedicated:
+            notify_startup(phase)
         doc = store.load(ident)
-        if doc["desired"] != "running" or not current(doc["config"]):
-            # An obsolete definition needs an operator, not a systemd restart loop.
+        if doc["desired"] != "running":
             return 0
+        if not current(doc["config"]):
+            # An obsolete definition needs an operator, not a systemd restart loop.
+            return STARTUP_EXIT["local_setup_refused"] if dedicated else 0
         event(directory, "worker_starting")
-        command, profile, env, work = prepare(store, doc)
+        try:
+            command, profile, env, work = prepare(store, doc)
+        except Error as error:
+            if error.code in {"identity_mismatch", "invalid_config", "obsolete_provider", "prerequisite_missing"}:
+                refusal = "local_setup_refused"
+            raise
         if stopping:
             return 0
+        phase = "profile_unconfirmed"
+        if dedicated:
+            notify_startup(phase)
         profile_env = {key: env[key] for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
         child = subprocess.Popen(profile, env=profile_env, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         if stopping:
@@ -194,8 +241,13 @@ def worker(store, ident):
         if stopping:
             return 0
         if child.returncode or not profile_accepted(output):
+            if dedicated and child.returncode == 0 and profile_refused(output):
+                refusal = "profile_refused"
             raise Error("profile_failed", "Profile update failed.")
         event(directory, "profile_applied")
+        phase = "local_runtime"
+        if dedicated:
+            notify_startup(phase)
         if stopping:
             return 0
         child = subprocess.Popen(command, env=env, cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -211,10 +263,14 @@ def worker(store, ident):
             raise Error("runtime_failed", "Runtime exited during startup.")
         write_json(directory / "ready.json", {"worker_pid": os.getpid(), "child_pid": child.pid, "revision": doc["revision"]})
         event(directory, "runtime_started")
+        if dedicated:
+            notify_startup("ready", ready=True)
         code = child.wait()
         event(directory, "worker_stopped" if stopping else "runtime_exited")
-        return 0 if stopping else (code or 1)
+        return 0 if stopping else (STARTUP_EXIT[phase] if dedicated else code or 1)
     except Exception:
+        if dedicated and not stopping:
+            notify_startup(phase)
         event(directory, "worker_failed")
         if child is not None and child.poll() is None:
             terminate_child()
@@ -223,6 +279,6 @@ def worker(store, ident):
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
-        return 1
+        return (0 if stopping else STARTUP_EXIT[refusal or phase]) if dedicated else 1
     finally:
         (directory / "ready.json").unlink(missing_ok=True)

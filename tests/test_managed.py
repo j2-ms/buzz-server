@@ -131,7 +131,7 @@ class ManagedTests(unittest.TestCase):
         with patch.dict(os.environ, ambient), patch("buzz_server.runtime.subprocess.Popen", return_value=child) as popen:
             code, output = self.wizard()
         self.assertEqual(code, 0, output)
-        self.assertIn("setup exited", output)
+        self.assertIn("Goose exited successfully", output)
         self.assertIn("unverified", output)
         args, kwargs = popen.call_args
         self.assertEqual(args, (["/usr/bin/true", "configure"],))

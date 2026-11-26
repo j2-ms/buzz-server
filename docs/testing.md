@@ -43,6 +43,23 @@ python3 -B scripts/acceptance.py --disposable
 
 The test installs the CLI in a temporary prefix and starts a private systemd user manager and D-Bus socket. It uses a loopback relay fixture and deterministic ACP adapter. `doctor --config` checks the explicit fixture path rather than requiring Goose on the system path. The test checks lifecycle, recovery after failed starts, reloads and manager restarts, identity retention, and fail-closed handling of unit overrides. It does not use credentials or external services. The script stops its processes and prints the retained evidence directory.
 
+For the dedicated route, use an isolated disposable systemd host with an
+existing dedicated account, an unprivileged operator and already verified pinned
+tools. Authorize ordinary operator sudo in the same terminal, then run:
+
+```sh
+sudo --validate
+timeout 180s python3 -B scripts/acceptance_dedicated.py --disposable \
+  --account buzz-fixture --tools /path/to/verified/tools/bin
+```
+
+The test uses the real system manager and packaged Buzz tools against a loopback
+membership fixture. It checks a classified refusal, publication of the same key
+after admission, a limited sequence of ambiguous failures, automatic recovery,
+and operator stop. It deletes the test unit and ends the loopback server.
+Desktop discovery, a reply, and a real relay's access policy require separate
+tests.
+
 ## Release candidate acceptance
 
 The offline unit suite builds synthetic named releases and exercises checksums,
@@ -83,7 +100,11 @@ upstream dependencies or prove their compatibility. `tests/test_dependencies.py`
 private permissions and symlinks, pinned size/digest verification, bounded exact
 tar payload selection, fixed TLS/proxy/redirect boundaries, staged failure,
 partial-publication retry and managed child paths with synthetic files. Bootstrap
-tests check dependency flag and terminal forwarding after verification. The unit
+tests check dependency flag and terminal forwarding after verification. A
+slow local release fixture exercises a piped bootstrap with a controlling TTY,
+including consent and refusal for a mode-0775 bin directory, and verifies the
+launcher. Separate no-terminal and JSON runs preserve the unsafe mode and
+return the actionable failure. The unit
 suite does not download upstream assets or execute vendor tools.
 
 `tests/test_public_transport.py` checks bootstrap/updater transport parity, fixed

@@ -136,7 +136,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Synthetic custom instruction", out)
 
     def test_guided_invalid_and_discard_leave_no_agent(self):
-        for answers in (["", "", "", "invalid", "wss://relay.example", "", "yes"],
+        for answers in (["", "", "", "invalid", EOFError()],
                         ["", "", "", "ab" * 32, "wss://relay.example", "", "no"],
                         ["", "", EOFError()], ["", "", KeyboardInterrupt()]):
             code, _, _ = self.guided(answers)
