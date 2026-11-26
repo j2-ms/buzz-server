@@ -42,6 +42,7 @@ class FakeCommands:
                  FragmentPath=str(self.unit_path), UnitFileState="enabled" if self.enabled else "disabled",
                  Result="success", NeedDaemonReload="no", KillMode="control-group", User=str(self.binding.uid),
                  Group=str(self.binding.gid), WorkingDirectory="/", NoNewPrivileges="yes",
+                 Type="notify", NotifyAccess="main",
                  Environment="PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + self.binding.home,
                  ExecStart="{ path=/usr/bin/python3 ; argv[]=" + " ".join(self.supervisor.argv) +
                            " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }")
@@ -97,9 +98,13 @@ class AccountSupervisorTests(unittest.TestCase):
                 if missing:
                     return False
                 raise Error("unit_conflict", "Synthetic missing root unit")
-            if exact and self.commands.files[path] != self.supervisor.content():
-                raise Error("unit_conflict", "Synthetic changed root unit")
-            return True
+            if not exact:
+                return True
+            if self.commands.files[path] == self.supervisor.content():
+                return "notify"
+            if path == self.commands.unit_path and self.commands.files[path] == self.supervisor.content(legacy=True):
+                return "exec"
+            raise Error("unit_conflict", "Synthetic changed root unit")
 
         patcher = patch.object(self.supervisor, "root_file", side_effect=root_file)
         patcher.start()
@@ -108,6 +113,18 @@ class AccountSupervisorTests(unittest.TestCase):
     def install(self):
         self.supervisor.install()
         self.commands.effects.clear()
+
+    def test_legacy_unit_remains_manageable_without_rewriting_it(self):
+        self.install()
+        legacy = self.supervisor.content(legacy=True)
+        self.commands.files[self.commands.unit_path] = legacy
+        self.commands.overrides.update(Type="exec", NotifyAccess="none")
+        self.supervisor.start()
+        self.supervisor.stop()
+        self.assertEqual(self.commands.files[self.commands.unit_path], legacy)
+        self.commands.overrides["Type"] = "notify"
+        with self.assertRaises(Error):
+            self.supervisor.inspect()
 
     def test_generated_unit_has_only_fixed_target_execution_and_no_hooks(self):
         content = self.supervisor.content().decode()

@@ -22,6 +22,18 @@ import test_accounts
 from test_account_supervisor import FakeCommands
 
 
+OPERATOR_NPUB = "npub14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4scf6zts"
+
+
+class OperatorPublicKeyTests(unittest.TestCase):
+    def test_guided_key_formats(self):
+        self.assertEqual(cli.operator_public_key(OPERATOR_NPUB.upper()), "ab" * 32)
+        for value in (OPERATOR_NPUB[:-1], OPERATOR_NPUB.upper().replace("N", "n", 1),
+                      OPERATOR_NPUB.upper().replace("S", "ſ", 1), "AB" * 32, "g0" * 32, "ab" * 31):
+            with self.subTest(value=value):
+                self.assertIsNone(cli.operator_public_key(value))
+
+
 class DedicatedCliTests(unittest.TestCase):
     def setUp(self):
         test_accounts.AccountTests.setUp(self)
@@ -35,6 +47,7 @@ class DedicatedCliTests(unittest.TestCase):
                    "harness": {"kind": "goose", "command": "/unused/goose"}})
         self.model = None
         self.target_doc = None
+        self.startup_status = b""
         self.private_state = b"SYNTHETIC-PRIVATE-STATE"
         self.requests = []
         self.installs = []
@@ -63,7 +76,7 @@ class DedicatedCliTests(unittest.TestCase):
                 raise Error("unit_conflict", "Synthetic missing unit")
             if exact and self.model.files[path] != supervisor.content():
                 raise Error("unit_conflict", "Synthetic wrong unit")
-            return True
+            return "notify" if exact else True
 
         patch("buzz_server.account_supervisor.AccountSystemd.root_file", root_file).start()
 
@@ -79,13 +92,19 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertEqual(argv[1], "--non-interactive")
             argv = [argv[0], *argv[2:]]
         if argv[:2] == ["/usr/bin/systemctl", "--system"]:
-            output = self.model.show(AccountSystemd.PROPERTIES) if self.model else b"LoadState=not-found\nDropInPaths=\nFragmentPath=\nActiveState=inactive\nMainPID=0\nControlGroup=\n"
+            if "--property=StatusText" in argv:
+                output = self.startup_status
+            else:
+                output = self.model.show(AccountSystemd.PROPERTIES) if self.model else b"LoadState=not-found\nDropInPaths=\nFragmentPath=\nActiveState=inactive\nMainPID=0\nControlGroup=\n"
         elif argv[:3] == ["/usr/bin/sudo", "--", "/usr/bin/systemctl"]:
             self.assertEqual(argv[3], "--system")
             if argv[4] == "daemon-reload":
                 self.assertEqual(len(argv), 5)
                 self.model.reload()
             else:
+                if argv[4] == "--no-block":
+                    self.assertEqual(argv[5], "start")
+                    argv.pop(4)
                 self.assertEqual(len(argv), 6)
                 self.assertEqual(argv[5], self.model.binding.service)
                 self.model.control(argv[4])
@@ -201,19 +220,31 @@ class DedicatedCliTests(unittest.TestCase):
         self.assertFalse(self.requests)
 
     def test_guided_dedicated_create_collects_without_mutation_lock_and_paths(self):
-        answers = ["", "", "", "ab" * 32, "wss://relay.example.test", "SYNTHETIC-PRIVATE-PROMPT", "yes"]
-        def answer(_):
+        answers = ["", "", "", "nsec1secret", OPERATOR_NPUB[:-1] + "q", OPERATOR_NPUB, "wss://relay.example.test", "SYNTHETIC-PRIVATE-PROMPT", "yes"]
+        prompts = []
+        def answer(prompt):
             self.assertFalse((self.store.root / ".lock").exists())
             self.assertFalse(self.bindings.path("assistant").exists())
+            prompts.append(prompt)
             return answers.pop(0)
         with patch("builtins.input", side_effect=answer), patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True), patch("sys.stderr.isatty", return_value=True):
             output = self.call("create", "assistant", "--account", "fixture", structured=False)
         self.assertIn("Buzz identity: " + "cd" * 32, output)
+        self.assertIn("created and left stopped", output)
+        self.assertIn("inference configure assistant", output)
+        self.assertEqual(prompts[3:6], [prompts[3]] * 3)
         applied = next(r for op, r in self.requests if op == "apply")
+        self.assertEqual(applied["config"]["owner"], cli.operator_public_key("ab" * 32))
         self.assertEqual(applied["prompt"], "SYNTHETIC-PRIVATE-PROMPT")
         self.assertTrue(applied["config"]["harness"]["command"].startswith("/home/fixture/"))
         self.assertFalse(answers)
         self.acquire.assert_not_called()
+
+    def test_cancel_at_operator_key_leaves_no_agent_state(self):
+        with patch("builtins.input", side_effect=["", "", "", "wrong", EOFError]), patch("sys.stdin.isatty", return_value=True):
+            self.call("create", "assistant", "--account", "fixture", structured=False, success=False)
+        self.assertFalse(self.bindings.path("assistant").exists())
+        self.run.assert_not_called()
 
     def test_guided_account_remap_before_commit_refuses_without_subprocess(self):
         answers = iter(["", "", "", "ab" * 32, "wss://relay.example.test", "prompt", "yes"])
@@ -237,8 +268,10 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertEqual(self.call("list")["agents"][0]["identity"], created["identity"])
             started = self.call("start", "assistant")
             self.assertEqual(started["service_state"], "active")
-            self.assertIs(started["runtime_started"], False)
+            self.assertIs(started["runtime_started"], True)
+            self.assertEqual(started["startup"]["profile"], "confirmed")
             self.assertIs(started["buzz_response_verified"], False)
+            self.assertIn("Buzz reply untested", self.call("start", "assistant", structured=False))
             self.assertEqual(self.call("status", "assistant")["identity"], created["identity"])
             with self.assertRaises(Error) as failure:
                 release.uninstall(prefix)
@@ -250,12 +283,36 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertEqual(configured["revision"], 2)
             self.call("stop", "assistant")
             with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True), patch("sys.stderr.isatty", return_value=True):
-                self.call("inference", "configure", "assistant", structured=False)
+                result = self.call("inference", "configure", "assistant", structured=False)
+                self.assertIn("A clean exit can also mean setup was cancelled", result)
             self.call("delete", "assistant")
             self.assertEqual(self.private_state, b"SYNTHETIC-PRIVATE-STATE")
             self.assertTrue(self.bindings.path("assistant").exists())
         release.uninstall(prefix)
         self.assertFalse((prefix / "bin/buzz-server").exists())
+
+    def test_dedicated_start_refusal_uses_only_safe_stage(self):
+        self.create()
+        self.model.overrides.update(ActiveState="failed", SubState="failed", MainPID="0",
+                                    Result="exit-code", ExecMainCode="1", ExecMainStatus="79")
+        self.startup_status = b"rejected: SYNTHETIC-PRIVATE-RESPONSE\n"
+        error = self.call("start", "assistant", success=False)
+        self.assertEqual(error["code"], "profile_refused")
+        self.assertIn("Automatic retries ended", error["message"])
+        status = self.call("status", "assistant", structured=False)
+        self.assertIn("Profile publication unconfirmed", status)
+        self.assertIn("Local runtime readiness unobserved", status)
+        self.assertNotIn("SYNTHETIC-PRIVATE-RESPONSE", status)
+
+    def test_dedicated_status_separates_profile_from_pending_runtime(self):
+        self.create()
+        self.assertIn("Profile publication unobserved", self.call("status", "assistant", structured=False))
+        self.model.overrides.update(ActiveState="activating", SubState="start", MainPID="23")
+        self.startup_status = b"buzz-server:local_runtime\n"
+        pending = self.call("status", "assistant")
+        self.assertEqual(pending["startup"], {"profile": "confirmed", "local_runtime": "unobserved",
+                                              "failure_stage": None, "retry": "waiting"})
+        self.assertFalse(pending["runtime_started"])
 
     def test_incomplete_and_corrupt_bindings_block_uninstall_before_services(self):
         from buzz_server.account_lifecycle import require_detached
@@ -284,8 +341,15 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertFalse(self.model.active)
 
     def test_dedicated_doctor_needs_no_operator_user_manager_or_sudo(self):
-        with patch("buzz_server.account_process.run", return_value=SimpleNamespace(returncode=0, stdout=b"fixture-systemd\n")) as query, patch("buzz_server.cli.Systemd.check", side_effect=AssertionError("user manager must not be checked")):
+        with (patch("buzz_server.account_process.run", return_value=SimpleNamespace(returncode=0, stdout=b"fixture-systemd\n")) as query,
+              patch("buzz_server.cli.Systemd.check", side_effect=AssertionError("user manager must not be checked")),
+              patch("buzz_server.release.before_command") as update_offer):
             result = self.call("doctor", "--account", "fixture")
+            plain = self.call("doctor", "--account", "fixture", structured=False)
+        update_offer.assert_not_called()
+        self.assertIn("Dedicated-account preflight passed for fixture", plain)
+        self.assertIn("Account layout and system manager reachability verified", plain)
+        self.assertIn("buzz-server create AGENT --account fixture", plain)
         self.assertEqual(query.call_args.args[0], ["/usr/bin/systemctl", "--system", "show", "--property=Version", "--value"])
         self.assertIs(result["buzz_response_verified"], False)
         self.run.assert_not_called()
@@ -293,8 +357,8 @@ class DedicatedCliTests(unittest.TestCase):
     def test_dedicated_doctor_explains_home_prerequisite_without_repair(self):
         original = Path.lstat
         for path, mode, uid, expected in (
-            (self.entry.pw_dir, stat.S_IFDIR | 0o750, self.entry.pw_uid, "mode 0700"),
-            (self.entry.pw_dir, stat.S_IFDIR | 0o700, 0, "owned by that account"),
+            (self.entry.pw_dir, stat.S_IFDIR | 0o750, self.entry.pw_uid, "has mode 0750; required mode is 0700"),
+            (self.entry.pw_dir, stat.S_IFDIR | 0o700, 0, "must be owned by fixture"),
             (self.entry.pw_dir, stat.S_IFLNK | 0o777, self.entry.pw_uid, "real directory"),
             ("/home", stat.S_IFDIR | 0o775, 0, "not writable by group or others"),
         ):
@@ -308,8 +372,12 @@ class DedicatedCliTests(unittest.TestCase):
                 assert isinstance(result, dict)
                 self.assertEqual(result["code"], "account_binding")
                 self.assertIn(expected, result["message"])
-                self.assertIn("host administrator", result["message"])
-                self.assertNotIn(self.entry.pw_dir, result["message"])
+                self.assertIn("administrator", result["message"])
+                self.assertIn(path, result["message"])
+                if stat.S_IMODE(mode) == 0o750:
+                    self.assertIn("chmod 0700 -- /home/fixture", result["message"])
+                else:
+                    self.assertNotIn("chmod", result["message"])
                 self.assertNotIn("binding", result["message"])
                 self.assertFalse(self.bindings.path("assistant").exists())
         self.run.assert_not_called()

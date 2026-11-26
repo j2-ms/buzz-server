@@ -25,6 +25,7 @@ class Commands:
         if not self.interactive or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)):
             return
         self.bindings.revalidate(self.binding)
+        self.progress("Waiting for operator sudo authorization. Respond to the sudo prompt if it appears.")
         try:
             # sudo uses the operator's controlling TTY and existing policy.
             auth = run(["/usr/bin/sudo", "--validate"], env=CLEAN_ENV.copy(),
@@ -35,6 +36,10 @@ class Commands:
         if auth.returncode:
             raise Error("account_command_failed", "Sudo validation did not succeed. State is retained; retry from an operator terminal with existing authorization.")
         self.bindings.revalidate(self.binding)
+
+    def progress(self, message):
+        if self.interactive and all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)):
+            print(message, file=sys.stderr, flush=True)
 
     def _run(self, argv, *, input=None, stdin=None, terminal=False, timeout=30, allow_missing=False):
         self.bindings.revalidate(self.binding)
@@ -58,8 +63,13 @@ class Commands:
     def control(self, operation):
         if operation not in {"start", "stop", "enable", "disable", "reset-failed"}:
             raise ValueError("invalid system operation")
+        flags = ["--no-block"] if operation == "start" else []
         return self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/systemctl", "--system",
-                          operation, self.binding.service])
+                          *flags, operation, self.binding.service])
+
+    def startup_status(self):
+        return self._run(["/usr/bin/systemctl", "--system", "show", self.binding.service,
+                          "--property=StatusText", "--value"]).rstrip(b"\n")
 
     def reload(self):
         return self._run(["/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/systemctl", "--system", "daemon-reload"])

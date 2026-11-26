@@ -8,6 +8,7 @@ import stat
 from typing import NoReturn
 
 from .errors import Error
+from .runtime import STARTUP_EXIT
 from .storage import atomic, read_json, write_json
 from .supervisor import cgroup_empty
 
@@ -21,7 +22,7 @@ class AccountSystemd:
                   "UnitFileState", "Result", "DropInPaths", "NeedDaemonReload", "KillMode", "ControlGroup",
                   "User", "Group", "ExecStart", "ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost",
                   "ExecReload", "Environment", "EnvironmentFiles", "PassEnvironment", "WorkingDirectory",
-                  "RootDirectory", "RootImage", "NoNewPrivileges")
+                  "RootDirectory", "RootImage", "NoNewPrivileges", "Type", "NotifyAccess", "ExecMainCode", "ExecMainStatus")
 
     def __init__(self, commands):
         self.commands = commands
@@ -34,12 +35,17 @@ class AccountSystemd:
         b = self.binding
         return ["/usr/bin/python3", "-I", b.data + "/worker.pyz", b.data + "/state", b.id]
 
-    def content(self):
+    def content(self, *, legacy=False):
         b = self.binding
         # Every substituted value comes from the validated operator binding,
         # with a restricted alphabet. No target config, paths or command hooks.
-        return ("[Unit]\nDescription=Buzz Server dedicated-account agent\nStartLimitIntervalSec=0\n"
-                "[Service]\nType=exec\nUser=" + str(b.uid) + "\nGroup=" + str(b.gid) +
+        # Even four full start timeouts, stop timeouts and delays fit inside this window.
+        limits = "StartLimitIntervalSec=0\n" if legacy else "StartLimitIntervalSec=300\nStartLimitBurst=4\n"
+        prevent = f"{STARTUP_EXIT['local_setup_refused']} {STARTUP_EXIT['profile_refused']}"
+        startup = ("Type=exec\n" if legacy else "Type=notify\nNotifyAccess=main\nTimeoutStartSec=30\n"
+                   f"RestartPreventExitStatus={prevent}\n")
+        return ("[Unit]\nDescription=Buzz Server dedicated-account agent\n" + limits +
+                "[Service]\n" + startup + "User=" + str(b.uid) + "\nGroup=" + str(b.gid) +
                 "\nExecStart=:" + " ".join(self.argv) +
                 "\nWorkingDirectory=/\nEnvironment=PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + b.home +
                 "\nUMask=0077\nNoNewPrivileges=yes\nKillMode=control-group\nTimeoutStopSec=10\n"
@@ -69,9 +75,15 @@ class AccountSystemd:
         if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_gid != 0 or stat.S_IMODE(s.st_mode) not in modes:
             conflict()
         if exact:
+            current = self.content()
+            legacy = self.content(legacy=True)
             with path.open("rb") as stream:
-                if stream.read(len(self.content()) + 1) != self.content():
-                    conflict()
+                content = stream.read(len(current) + 1)
+            if content == current:
+                return "notify"
+            if path == self.commands.unit_path and content == legacy:
+                return "exec"
+            conflict()
         return True
 
     def inspect(self, *, missing=False, removing=False):
@@ -99,14 +111,18 @@ class AccountSystemd:
                     or state.get("MainPID") != "0" or "ControlGroup" not in state
                     or not cgroup_empty(state["ControlGroup"])):
                 conflict()
+            unit_type = state.get("Type")
         else:
-            self.root_file(self.commands.unit_path)
+            unit_type = self.root_file(self.commands.unit_path)
         expected = {"Id": self.binding.service, "LoadState": "loaded",
                     "FragmentPath": str(self.commands.unit_path), "DropInPaths": "",
                     "NeedDaemonReload": state["NeedDaemonReload"] if removing else "no", "KillMode": "control-group",
                     "User": str(self.binding.uid), "Group": str(self.binding.gid),
                     "Environment": "PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=" + self.binding.home, "PassEnvironment": "",
-                    "WorkingDirectory": "/", "RootDirectory": "", "RootImage": "", "NoNewPrivileges": "yes"}
+                    "WorkingDirectory": "/", "RootDirectory": "", "RootImage": "", "NoNewPrivileges": "yes",
+                    "Type": unit_type, "NotifyAccess": "main" if unit_type == "notify" else "none"}
+        if unit_type not in {"notify", "exec"}:
+            conflict()
         if any(state.get(k) != v for k, v in expected.items()):
             conflict()
         # systemctl 255 omits empty structured arrays even with --all. The

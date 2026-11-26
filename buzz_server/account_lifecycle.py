@@ -16,7 +16,46 @@ from .accounts import Bindings
 from .account_commands import Commands
 from .account_supervisor import AccountSystemd
 from .errors import Error
+from .runtime import STARTUP_EXIT
 from .storage import read_json, read_private, write_json
+
+
+STARTUP_ACTIONS = {
+    "local_setup": "Check the dedicated worker prerequisites and agent configuration.",
+    "profile_unconfirmed": "Check the relay URL, connectivity and admission for the printed Buzz identity.",
+    "profile_refused": "Ask the relay administrator to check write access for the printed Buzz identity.",
+    "local_runtime": "Check the installed runtime tools and agent configuration.",
+    "startup_failed": "Check the system unit and the dedicated worker prerequisites.",
+}
+STARTUP_STATUS = {b"buzz-server:" + phase.encode(): phase for phase in
+                  ("local_setup", "profile_unconfirmed", "local_runtime", "ready")}
+EXIT_STAGE = {str(code): phase for phase, code in STARTUP_EXIT.items()}
+EXIT_STAGE[str(STARTUP_EXIT["local_setup_refused"])] = "local_setup"
+
+
+def render_startup(data):
+    report = data["startup"]
+    profile = {
+        "confirmed": "Profile publication confirmed.",
+        "unconfirmed": "Profile publication unconfirmed.",
+        "unobserved": "Profile publication unobserved.",
+    }
+    runtime = ("Local runtime process observed." if data["runtime_started"]
+               else "Local runtime readiness unobserved.")
+    lines = [profile[report["profile"]], runtime,
+             "Buzz reply untested. See First reply in docs/quickstart.md."]
+    if report["failure_stage"]:
+        stage = report["failure_stage"]
+        lines.append(f"Startup stage [{stage}]. {STARTUP_ACTIONS[stage]}")
+    if report["retry"] == "pending":
+        lines.append(f"Systemd is retrying within its startup limit. Run buzz-server stop {data['id']} to cancel.")
+    elif report["retry"] == "ended":
+        lines.append(f"Automatic retries ended. After correction, run buzz-server start {data['id']}.")
+    elif report["retry"] == "waiting":
+        lines.append("The local readiness check has yet to complete.")
+    elif report["retry"] == "unobserved" and data["desired"] == "running":
+        lines.append("The installed worker does not report local readiness.")
+    return lines
 
 
 def manifest_path(bindings, ident):
@@ -105,6 +144,7 @@ class Lifecycle:
     def install_payload(self, *, structured=False):
         # Acquisition uses the existing pinned transport and exact extraction.
         # Nothing from the operator's install, state or home is copied wholesale.
+        self.commands.progress("Preparing the dedicated worker and its pinned tools.")
         acquired_names = []
         with tempfile.TemporaryDirectory(prefix=".account-tools-", dir=self.bindings.root) as temp:
             stage = Path(temp)
@@ -133,7 +173,10 @@ class Lifecycle:
                         print("Acquiring missing pinned dedicated-worker tools: " + ", ".join(missing) + ".", file=sys.stderr)
                     acquired = sub / "acquired"
                     acquired.mkdir(mode=0o700)
-                    dependencies.acquire(package, acquired)
+                    if not structured and dependencies.interactive():
+                        dependencies.acquire(package, acquired, show_progress=True)
+                    else:
+                        dependencies.acquire(package, acquired)
                     for name in missing:
                         os.replace(acquired / name, sub / name)
                     acquired_names.extend(missing)
@@ -157,6 +200,7 @@ class Lifecycle:
                         shutil.copyfileobj(source, stream, 65536)
                 stream.seek(0)
                 self.commands.authenticate()
+                self.commands.progress("Staging the worker under the dedicated account.")
                 self.target("install", stdin=stream)
         return acquired_names
 
@@ -184,16 +228,48 @@ class Lifecycle:
             read_private(candidate["prompt_file"], 65536).decode("utf-8")
         acquired = self.install_payload(structured=structured)
         self.apply(doc, path, prepared=prepared)
+        self.commands.progress("Installing the stopped system service and checking it with systemd.")
         self.supervisor.install()
         doc["phase"] = "ready"
         self.save(doc)
         return {**self.view(doc), "tools_acquired": acquired}
 
-    def view(self, doc):
-        state = self.supervisor.inspect()
+    def startup(self, state):
+        service = state["ActiveState"]
+        if state["Type"] == "exec":
+            return {"profile": "unobserved", "local_runtime": "unobserved",
+                    "failure_stage": None, "retry": "unobserved"}
+        # READY=1 is accepted by systemd only from the current native worker.
+        # StatusText is advisory and is never read by service-action guards.
+        if service == "active" and int(state["MainPID"]) > 1:
+            return {"profile": "confirmed", "local_runtime": "ready",
+                    "failure_stage": None, "retry": None}
+        phase = None
+        if service in {"activating", "failed"}:
+            try:
+                phase = STARTUP_STATUS.get(self.commands.startup_status())
+            except Error:
+                pass
+        retrying = state["SubState"] in {"auto-restart", "auto-restart-queued"}
+        stage = None
+        if retrying or service == "failed":
+            exit_status = state.get("ExecMainStatus") if state.get("ExecMainCode") == "1" else None
+            stage = EXIT_STAGE.get(exit_status)
+            if stage is None:
+                stage = phase if phase in STARTUP_ACTIONS else "startup_failed"
+        return {"profile": ("confirmed" if stage == "local_runtime" or stage is None and phase in {"local_runtime", "ready"}
+                            else "unconfirmed" if phase == "profile_unconfirmed" or stage in {"profile_refused", "profile_unconfirmed"}
+                            else "unobserved"),
+                "local_runtime": "unobserved", "failure_stage": stage,
+                "retry": ("ended" if service == "failed" else "pending" if retrying
+                          else "waiting" if service == "activating" else None)}
+
+    def view(self, doc, state=None):
+        state = self.supervisor.inspect() if state is None else state
+        startup = self.startup(state)
         return {"id": doc["id"], "identity": doc["identity"], "revision": doc["revision"],
                 "desired": doc["desired"], "service_state": state["ActiveState"], "service_result": state.get("Result", "unknown"),
-                "runtime_started": False, "buzz_response_verified": False,
+                "runtime_started": startup["local_runtime"] == "ready", "buzz_response_verified": False, "startup": startup,
                 "service_account": {"uid": self.binding.uid, "name": self.binding.account},
                 "configuration": {"harness": "goose", "provider": "goose-managed", "model": None,
                                   "profile_configured": True, "prompt_configured": True},
@@ -207,13 +283,25 @@ class Lifecycle:
     def start(self, doc):
         self.supervisor.inspect()
         self.desired(doc, "running")
+        self.commands.progress("Asking systemd to start the service and waiting for startup.")
         self.supervisor.start()
-        for _ in range(100):
+        deadline = time.monotonic() + 10
+        while True:
             state = self.supervisor.inspect()
             if state["ActiveState"] == "active" and int(state["MainPID"]) > 1 and state["UnitFileState"] == "enabled":
-                return self.view(doc)
+                return self.view(doc, state)
+            if state["Type"] == "notify" and state["ActiveState"] == "failed":
+                report = self.startup(state)
+                stage = report["failure_stage"]
+                raise Error(stage, f"{STARTUP_ACTIONS[stage]} Automatic retries ended. After correction, run buzz-server start {doc['id']}. Buzz reply untested.")
+            if time.monotonic() >= deadline:
+                break
             time.sleep(0.1)
-        raise Error("start_unverified", "The system unit did not reach active state in ten seconds. Desired state remains running; stop cancels retries. No runtime or Buzz reply was verified.")
+        report = self.startup(state)
+        stage = report["failure_stage"]
+        if stage:
+            raise Error(stage, f"{STARTUP_ACTIONS[stage]} Systemd is retrying within its startup limit. Run buzz-server status {doc['id']} for the latest stage or buzz-server stop {doc['id']} to cancel. Buzz reply untested.")
+        raise Error("start_unverified", f"Startup was not observed within ten seconds. Run buzz-server status {doc['id']} to check systemd or buzz-server stop {doc['id']} to cancel. Buzz reply untested.")
 
     def stop(self, doc):
         doc["desired"] = "stopped"

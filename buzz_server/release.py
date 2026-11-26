@@ -9,6 +9,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import re
+import shlex
 import ssl
 import stat
 import sys
@@ -184,7 +185,8 @@ def locked(prefix, *, shared=False, fresh=False, wait=10):
         denied()
     else:
         private_dir(prefix)
-    fd = os.open(prefix / '.release.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    access = os.O_RDONLY if shared else os.O_RDWR | os.O_CREAT
+    fd = os.open(prefix / '.release.lock', access | os.O_NOFOLLOW, 0o600)
     try:
         s = os.fstat(fd)
         if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or stat.S_IMODE(s.st_mode) & 0o077:
@@ -203,25 +205,85 @@ def locked(prefix, *, shared=False, fresh=False, wait=10):
         os.close(fd)
 
 
-def user_command(prefix, *, installing=False):
+def check_user_bin(home, *, installing, approved=None):
+    """Check each directory without following links or trusting a re-opened path."""
+    with contextlib.ExitStack() as stack:
+        parent = None
+        for directory in (home, home / '.local', home / '.local/bin'):
+            name = directory if parent is None else directory.name
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                if not installing:
+                    raise
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    pass
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except OSError:
+                raise Error('release_refused', f'Cannot check {directory}. Verify access to this directory and its parent.') from None
+            if stat.S_ISLNK(info.st_mode):
+                raise Error('release_refused', f'{directory} is a symlink. Inspect where it points; the installer needs a real directory at this path.')
+            if not stat.S_ISDIR(info.st_mode):
+                raise Error('release_refused', f'{directory} is not a directory. Inspect the entry at this path.')
+            if info.st_uid != os.getuid():
+                raise Error('release_refused', f'{directory} belongs to UID {info.st_uid}. Inspect the owner of this directory; the installer requires your own directory.')
+            try:
+                flags = os.O_RDONLY if approved and directory == home / '.local/bin' else os.O_PATH
+                fd = os.open(name, flags | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            except OSError:
+                raise Error('release_refused', f'Cannot open {directory} safely. Check access and retry with a real directory.') from None
+            stack.callback(os.close, fd)
+            checked = os.fstat(fd)
+            if (checked.st_dev, checked.st_ino, checked.st_uid, checked.st_mode) != (
+                    info.st_dev, info.st_ino, info.st_uid, info.st_mode):
+                raise Error('release_refused', f'{directory} changed while being checked. Inspect the directory before retrying.')
+            mode = stat.S_IMODE(info.st_mode)
+            if mode & 0o022:
+                desired = mode & ~0o022
+                if directory != home / '.local/bin' or approved != (info.st_dev, info.st_ino, mode):
+                    message = (f'{directory} has mode {mode:04o} and is writable by group or others. '
+                               f'If these bits are unintended, run chmod g-w,o-w -- {shlex.quote(str(directory))} and retry.')
+                    raise UserBinPermissions(message, directory, info)
+                os.fchmod(fd, desired)
+            parent = fd
+
+
+class UserBinPermissions(Error):
+    def __init__(self, message, path, info):
+        super().__init__('release_refused', message)
+        self.path = path
+        self.mode = stat.S_IMODE(info.st_mode)
+        self.approval = (info.st_dev, info.st_ino, self.mode)
+
+
+def user_command(prefix, *, installing=False, offer_repair=False):
     """Return the managed standard command; never follow or replace a foreign one."""
     home = Path.home().absolute()
     if prefix != home / '.local/buzz-server-cli':
         return None
-    for directory in (home, home / '.local', home / '.local/bin'):
-        if installing and not directory.exists() and not directory.is_symlink():
-            directory.mkdir(mode=0o700, exist_ok=True)
-        try:
-            info = directory.lstat()
-        except FileNotFoundError:
-            if not installing:
-                return None
+    try:
+        check_user_bin(home, installing=installing)
+    except UserBinPermissions as error:
+        if not installing:
+            return None
+        if not offer_repair or error.path != home / '.local/bin':
             raise
-        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
-                stat.S_IMODE(info.st_mode) & 0o022):
-            if not installing:
-                return None
-            raise Error('release_refused', 'The standard user bin path must be owned by you, be a real directory and not be group- or world-writable.')
+        print(f'Remove group and other write bits from {error.path} ({error.mode:04o} → {error.mode & ~0o022:04o})? [y/N] ',
+              end='', file=sys.stderr, flush=True)
+        try:
+            consent = input().strip().lower() in ('y', 'yes')
+        except EOFError:
+            consent = False
+        if not consent:
+            raise error from None
+        check_user_bin(home, installing=False, approved=error.approval)
+        check_user_bin(home, installing=False)
+    except (Error, FileNotFoundError):
+        if not installing:
+            return None
+        raise
     command = home / '.local/bin/buzz-server'
     try:
         info = command.lstat()
@@ -303,19 +365,24 @@ def _install(artifact, prefix, state, units):
     return {'version': number, 'prefix': str(prefix), 'auto_update': m['auto_update'], 'workers_restarted': False}
 
 
-def install(artifact, prefix, state, units):
+def install(artifact, prefix, state, units, *, offer_repair=False):
     # Invalid artifacts must not leave even an empty installation behind.
     inspect_artifact(artifact)
     prefix = Path(prefix).absolute()
+    home = Path.home().absolute()
+    standard = prefix == home / '.local/buzz-server-cli'
+    # The standard layout gets component-specific diagnostics. Ancestors above
+    # the home and all other paths still get the general symlink checks.
+    diagnosed = {home, home / '.local'} if standard else set()
     for p in (prefix, Path(state).absolute(), Path(units).absolute()):
-        if '..' in p.parts or any(part.is_symlink() for part in (p, *p.parents)):
+        if '..' in p.parts or any(part.is_symlink() for part in (p, *p.parents) if part not in diagnosed):
             denied()
     for p in (Path(state).absolute(), Path(units).absolute()):
         if p == prefix or prefix in p.parents or p in prefix.parents:
             denied()
     # Create the standard parent with a safe mode even under a permissive umask.
-    if prefix == Path.home().absolute() / ".local/buzz-server-cli":
-        user_command(prefix, installing=True)
+    if standard:
+        user_command(prefix, installing=True, offer_repair=offer_repair)
     with locked(prefix, fresh=True) as prefix:
         return _install(artifact, prefix, state, units)
 

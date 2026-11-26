@@ -181,7 +181,7 @@ class DependencyTests(unittest.TestCase):
                 else:
                     held_at_prompt.append(False)
             return 'yes'
-        def acquire(package, stage):
+        def acquire(package, stage, *, show_progress=False):
             for name, _ in package['members'].values():
                 (stage / name).write_bytes(b'fixture'); (stage / name).chmod(0o700)
         with (patch.object(d, 'paths', side_effect=lambda _: after if held_at_prompt else before),
@@ -332,7 +332,7 @@ class DependencyTests(unittest.TestCase):
               patch.object(d, 'probe') as probe, patch('buzz_server.identity.public'),
               contextlib.redirect_stdout(output)):
             self.assertEqual(cli.main(['--json', '--state-dir', str(self.store.root), 'doctor', '--config', str(config)]), 0)
-        self.assertEqual(json.loads(output.getvalue())['data']['goose_path'], '/usr/bin/true')
+        self.assertEqual(json.loads(output.getvalue())['data']['goose_path'], str(Path('/usr/bin/true').resolve()))
         self.assertEqual(probe.call_count, 4)
 
     def test_probe_sanitizes_environment_and_bounds_output(self):

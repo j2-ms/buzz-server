@@ -234,10 +234,14 @@ def probe(path, argv, flags, home):
         refused()
 
 
-def acquire(package, stage):
+def acquire(package, stage, *, show_progress=False):
     asset = stage / ('asset.deb' if package['name'] == 'buzz' else 'asset.tar.gz')
+    if show_progress:
+        print(f"Downloading pinned {package['name']} {package['version']}.", file=sys.stderr, flush=True)
     download(package, asset)
     # Defense in depth before invoking even the fixed OS archive reader.
+    if show_progress:
+        print(f"Verifying and staging {package['name']}.", file=sys.stderr, flush=True)
     verify(asset, package)
     archive = asset
     if package['name'] == 'buzz':
@@ -321,7 +325,10 @@ def install(store, *, opted, skip, structured):
                         for package in PACKAGES:
                             if any(name in missing for name, _ in package['members'].values()):
                                 sub = private_dir(staged / package['name'])
-                                acquire(package, sub)
+                                if not structured and interactive():
+                                    acquire(package, sub, show_progress=True)
+                                else:
+                                    acquire(package, sub)
                         for name in missing:
                             package = next(p for p in PACKAGES if any(n == name for n, _ in p['members'].values()))
                             source = staged / package['name'] / name

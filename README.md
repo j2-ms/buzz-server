@@ -13,6 +13,8 @@ such as `buzz-assistant`. Install the CLI from **your own login**:
 ```
 
 If the installer offers missing runtime tools, press Enter to install them.
+If it offers to remove group and other write bits from your `~/.local/bin`,
+check the proposed change before accepting.
 If your shell can't find `buzz-server`, open a fresh login shell. Have your
 [relay URL and Buzz public key](docs/quickstart.md) ready, then run:
 
@@ -24,8 +26,9 @@ buzz-server inference configure assistant
 
 `create` asks for your Buzz public key, relay, and the agent's profile and prompt.
 The CLI handles paths and permissions; the agent gets neither the management
-CLI nor `sudo`. Follow [First reply](docs/quickstart.md#first-reply) to add the
-agent to a channel, start it, and check that it replies in your Buzz thread.
+CLI nor `sudo`. Follow the quickstart to
+[admit the key if required](docs/quickstart.md#admit-the-key-and-start), start the
+agent, then [add it to a channel and check a reply](docs/quickstart.md#first-reply).
 For a custom OpenAI-compatible endpoint, see [Goose provider setup](docs/quickstart.md#custom-openai-compatible-endpoint).
 
 See the [account guide](docs/service-accounts.md) for isolation, retained data and

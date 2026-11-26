@@ -81,6 +81,50 @@ class ReleaseTests(unittest.TestCase):
     def test_fresh_install_enables_interactive_offers(self):
         self.assertTrue(self.install()['auto_update'])
 
+    def test_standard_bin_repair_revalidates_the_directory_after_consent(self):
+        home = self.base / 'home'
+        directory = home / '.local/bin'
+        directory.mkdir(parents=True)
+        directory.chmod(0o775)
+        moved = directory.with_name('original')
+
+        def replace_during_prompt():
+            directory.rename(moved)
+            directory.mkdir()
+            directory.chmod(0o775)
+            return 'yes'
+
+        with (patch.dict(os.environ, {'HOME': str(home)}),
+              patch('builtins.input', side_effect=replace_during_prompt),
+              patch('sys.stderr', io.StringIO())):
+            with self.assertRaisesRegex(Error, 'writable by group or others'):
+                release.install(self.a, home / '.local/buzz-server-cli', self.state, self.units, offer_repair=True)
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o775)
+        self.assertEqual(moved.stat().st_mode & 0o777, 0o775)
+        self.assertFalse((directory / 'buzz-server').exists())
+
+    def test_standard_bin_refuses_foreign_owner_before_permission_consent(self):
+        home = self.base / 'home'
+        directory = home / '.local/bin'
+        directory.mkdir(parents=True)
+        directory.chmod(0o775)
+        real_stat = os.stat
+
+        def foreign(path, **kwargs):
+            info = real_stat(path, **kwargs)
+            if path == 'bin' and kwargs.get('dir_fd') is not None:
+                info = os.stat_result((*info[:4], os.getuid() + 1, *info[5:]))
+            return info
+
+        with (patch.dict(os.environ, {'HOME': str(home)}), patch.object(release.os, 'stat', side_effect=foreign),
+              patch('builtins.input') as consent):
+            with self.assertRaisesRegex(Error, 'belongs to UID') as refusal:
+                release.install(self.a, home / '.local/buzz-server-cli', self.state, self.units, offer_repair=True)
+        self.assertIn(str(directory), str(refusal.exception))
+        self.assertNotIn('chmod', str(refusal.exception))
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o775)
+        consent.assert_not_called()
+
     def test_deterministic_build_and_version_offline(self):
         other = self.base / 'other.pyz'
         release.build(self.source, other, '1.0.0')

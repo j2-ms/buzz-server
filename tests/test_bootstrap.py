@@ -202,7 +202,7 @@ def resolve(name, root=None):
 def supported():
     pass
 
-def acquire(package, directory):
+def acquire(package, directory, *, show_progress=False):
     for name, _ in package['members'].values():
         binary = directory / name
         binary.write_bytes(b'#!/bin/sh\\nexit 0\\n')
@@ -220,11 +220,26 @@ def acquire(package, directory):
         self.assertTrue(separator)
         script.write_text(prefix + '\ndef fetch(url, target, limit):\n'
                           + f'    path = {str(metadata)!r} if url == API_URL else {str(self.artifact)!r}\n'
+                          + '    __import__("time").sleep(0.2)\n'
                           + '    target.write_bytes(Path(path).read_bytes())\n\n' + separator + tail)
-        for response, downloads in ((b'\n', True), (b'no\n', False)):
-            with self.subTest(downloads=downloads):
-                home = self.base / ('accept' if downloads else 'decline')
-                home.mkdir(mode=0o700)
+        for case, repair, deps, code in (('accept', b'yes\n', b'\n', 0),
+                                        ('skip-tools', b'yes\n', b'no\n', 0),
+                                        ('decline-repair', b'\n', None, 1),
+                                        ('symlink', None, None, 1)):
+            with self.subTest(case=case):
+                home = self.base / case
+                bin_dir = home / '.local/bin'
+                bin_dir.mkdir(parents=True)
+                home.chmod(0o700)
+                bin_dir.parent.chmod(0o750)
+                if case == 'symlink':
+                    target = bin_dir.with_name('elsewhere')
+                    bin_dir.rename(target)
+                    bin_dir.symlink_to(target)
+                bin_dir.chmod(0o775)
+                neighbor = bin_dir / 'fixture'
+                neighbor.touch()
+                neighbor.chmod(0o644)
                 child, master = pty.fork()
                 if child == 0:
                     os.chdir(home)
@@ -233,7 +248,7 @@ def acquire(package, directory):
                               {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
                 reaped = False
                 output = b''
-                sent = False
+                repair_sent = deps_sent = False
                 try:
                     deadline = time.monotonic() + 10
                     while time.monotonic() < deadline:
@@ -245,15 +260,20 @@ def acquire(package, directory):
                                     raise
                                 part = b''
                             output += part
-                            if not sent and b'Install missing tools? [Y/n]' in output:
-                                os.write(master, response)
-                                sent = True
+                            if not repair_sent and b'0755)? [y/N]' in output and repair is not None:
+                                os.write(master, repair)
+                                repair_sent = True
+                            if not deps_sent and b'Install missing tools? [Y/n]' in output and deps is not None:
+                                os.write(master, deps)
+                                deps_sent = True
                         pid, status = os.waitpid(child, os.WNOHANG)
                         if pid:
                             reaped = True
-                            self.assertEqual(os.waitstatus_to_exitcode(status), 0, output)
+                            self.assertEqual(os.waitstatus_to_exitcode(status), code, output)
                             break
-                    self.assertTrue(reaped and sent, output)
+                    self.assertTrue(reaped, output)
+                    self.assertEqual(repair_sent, repair is not None)
+                    self.assertEqual(deps_sent, deps is not None)
                 finally:
                     if not reaped:
                         try:
@@ -263,10 +283,34 @@ def acquire(package, directory):
                         os.waitpid(child, 0)
                     os.close(master)
                 command = home / '.local/bin/buzz-server'
-                self.assertTrue(command.is_symlink())
+                self.assertIn(b'Checking the public Buzz Server release.', output)
+                self.assertLess(output.index(b'Downloading Buzz Server'), output.index(b'Verifying the installer payload'))
+                self.assertEqual(command.is_symlink(), code == 0)
+                if code == 0:
+                    self.assertEqual(subprocess.check_output([command, '--version']).strip(), b'1.0.0')
+                self.assertEqual(bin_dir.stat().st_mode & 0o777, 0o775 if code else 0o755)
+                self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(bin_dir.parent.stat().st_mode & 0o777, 0o750)
+                self.assertEqual(neighbor.stat().st_mode & 0o777, 0o644)
                 tools = home / '.local/share/buzz-server/tools/bin'
                 self.assertEqual({p.name for p in tools.glob('*')},
-                                 {'buzz', 'buzz-acp', 'goose'} if downloads else set())
+                                 {'buzz', 'buzz-acp', 'goose'} if case == 'accept' else set())
+
+        for flags in ([], ['--json']):
+            home = self.base / ('json' if flags else 'no-tty')
+            bin_dir = home / '.local/bin'
+            bin_dir.mkdir(parents=True)
+            bin_dir.chmod(0o775)
+            with script.open('rb') as script_input:
+                result = subprocess.run(['/usr/bin/python3', '-I', '-', *flags], stdin=script_input,
+                                        capture_output=True, timeout=10,
+                                        env={'HOME': str(home), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, b'')
+            self.assertNotIn(b'Downloading Buzz Server', result.stderr)
+            self.assertNotIn(b'[y/N]', result.stderr)
+            self.assertIn(b'chmod g-w,o-w --', result.stderr)
+            self.assertEqual(bin_dir.stat().st_mode & 0o777, 0o775)
 
     def test_interactive_consent_has_no_parent_deadline(self):
         def fetch(args, target, limit):

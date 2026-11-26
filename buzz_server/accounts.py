@@ -44,21 +44,25 @@ def account(name, *, diagnose=False):
     if (not re.fullmatch(r"/[A-Za-z0-9_./-]+", entry.pw_dir) or home == Path("/")
             or str(home) != entry.pw_dir or ".." in home.parts):
         reject("The dedicated account needs an absolute, normalized home path in the supported format.")
-    for path in (home, *home.parents):
+    home_mode = None
+    for path in (*reversed(home.parents), home):
         location = "The dedicated account's home" if path == home else "A parent of the dedicated account's home"
         try:
             s = path.lstat()
         except OSError:
-            reject(location + " could not be checked; verify that it exists and can be reached from the operator login.")
+            reject(f"{location} ({path}) could not be checked; verify that it exists and can be reached from the operator login.")
         if not stat.S_ISDIR(s.st_mode):
-            reject(location + " must be a real directory, not a symlink or file.")
+            reject(f"{location} ({path}) must be a real directory, not a symlink or file.")
         if path == home:
             if s.st_uid != entry.pw_uid:
-                reject(location + " must be owned by that account.")
-            if stat.S_IMODE(s.st_mode) != 0o700:
-                reject(location + " must have mode 0700.")
+                reject(f"{location} ({path}) must be owned by {name}.")
+            home_mode = stat.S_IMODE(s.st_mode)
         elif s.st_uid != 0 or stat.S_IMODE(s.st_mode) & 0o022:
-            reject(location + " must be root-owned and not writable by group or others.")
+            reject(f"{location} ({path}) must be root-owned and not writable by group or others.")
+    if home_mode != 0o700:
+        if diagnose:
+            raise Error("account_binding", f"Dedicated account {name}: home {home} has mode {home_mode:04o}; required mode is 0700. Ask the administrator to run chmod 0700 -- {home} on that directory, then rerun buzz-server doctor --account {name}.")
+        refused()
     return entry
 
 
