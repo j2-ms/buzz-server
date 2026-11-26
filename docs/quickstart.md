@@ -218,8 +218,9 @@ above, do that before sending another mention.
 - `start` enables the service for future boots. A new dedicated service waits
   for profile publication and a locally running worker. The CLI observes
   startup for up to ten seconds while systemd can continue trying in the
-  background. Systemd allows four starts in the startup window and stops
-  sooner on a classified refusal. Use `buzz-server status assistant` to see
+  background. Systemd allows four starts in five minutes, including restarts
+  after runtime crashes, and stops sooner on a classified refusal. Use
+  `buzz-server status assistant` to see
   the latest stage, `buzz-server stop assistant` to cancel, or `buzz-server
   start assistant` after correcting a failure.
 - `buzz-server delete assistant` verifies stop and removes the system unit and target definition. It retains the key, credentials and work under the bound target home, plus the private operator binding/removal proof. The ID stays reserved. It does not remove the Linux account or Buzz history. Same-account retained data stays under `${XDG_DATA_HOME:-$HOME/.local/share}/buzz-server`.

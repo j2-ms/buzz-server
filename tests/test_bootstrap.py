@@ -238,7 +238,8 @@ def acquire(package, directory, *, show_progress=False):
                     bin_dir.symlink_to(target)
                 bin_dir.chmod(0o775)
                 neighbor = bin_dir / 'fixture'
-                neighbor.touch(mode=0o644)
+                neighbor.touch()
+                neighbor.chmod(0o644)
                 child, master = pty.fork()
                 if child == 0:
                     os.chdir(home)

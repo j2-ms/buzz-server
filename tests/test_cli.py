@@ -437,6 +437,75 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(worker(store, "agent"), 0)
             prep.assert_not_called()
 
+    def test_dedicated_worker_refuses_obsolete_config_or_missing_prerequisite(self):
+        store = Store(self.base / "state")
+        private_dir(store.directory("agent"))
+        for provider in ("obsolete", "goose-managed"):
+            doc = {"desired": "running", "config": {"provider": {"kind": provider}}}
+            with (self.subTest(provider=provider),
+                  patch.object(store, "load", return_value=doc),
+                  patch("buzz_server.runtime.signal.signal"),
+                  patch("buzz_server.runtime.notify_startup"),
+                  patch("buzz_server.runtime.prepare", side_effect=Error("prerequisite_missing", "synthetic")) as prep,
+                  patch("buzz_server.runtime.subprocess.Popen") as launch):
+                self.assertEqual(worker(store, "agent", dedicated=True), 78)
+                self.assertEqual(prep.call_count, int(provider == "goose-managed"))
+                launch.assert_not_called()
+
+    def test_dedicated_worker_distinguishes_explicit_profile_refusal_from_retry(self):
+        store = Store(self.base / "state")
+        private_dir(store.directory("agent"))
+        doc = {"desired": "running", "config": {"provider": {"kind": "goose-managed"}}}
+        env = {key: "fixture" for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
+        refusal = b'{"accepted":false,"message":"restricted: fixture membership required"}'
+        cases = ((0, refusal, 79), (0, b'{"accepted":false,"message":"temporary"}', 75), (1, refusal, 75))
+        for child_code, output, expected in cases:
+            profile = Mock(returncode=child_code)
+            profile.communicate.return_value = (output, None)
+            with (self.subTest(child_code=child_code, output=output),
+                  patch.object(store, "load", return_value=doc),
+                  patch("buzz_server.runtime.signal.signal"),
+                  patch("buzz_server.runtime.notify_startup") as notify,
+                  patch("buzz_server.runtime.prepare", return_value=(["runtime"], ["profile"], env, self.base)),
+                  patch("buzz_server.runtime.subprocess.Popen", return_value=profile) as launch):
+                self.assertEqual(worker(store, "agent", dedicated=True), expected)
+                launch.assert_called_once()
+                self.assertEqual(launch.call_args.args[0], ["profile"])
+                self.assertFalse(any(call.kwargs.get("ready") for call in notify.call_args_list))
+
+    def test_dedicated_worker_runtime_exit_after_ready_distinguishes_stop(self):
+        store = Store(self.base / "state")
+        directory = private_dir(store.directory("agent"))
+        doc = {"desired": "running", "revision": 1, "config": {"provider": {"kind": "goose-managed"}}}
+        env = {key: "fixture" for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
+        for stopping, expected in ((False, 76), (True, 0)):
+            profile = Mock(returncode=0)
+            profile.communicate.return_value = (b'{"accepted":true}', None)
+            runtime = Mock(pid=123)
+            runtime.poll.return_value = None
+            signals = {}
+            ready_at_exit = []
+
+            def finish():
+                ready_at_exit.append((directory / "ready.json").exists())
+                if stopping:
+                    signals[signal.SIGTERM](signal.SIGTERM, None)
+                return 1
+
+            runtime.wait.side_effect = finish
+            with (self.subTest(stopping=stopping),
+                  patch.object(store, "load", return_value=doc),
+                  patch("buzz_server.runtime.signal.signal", side_effect=signals.__setitem__),
+                  patch("buzz_server.runtime.notify_startup") as notify,
+                  patch("buzz_server.runtime.prepare", return_value=(["runtime"], ["profile"], env, self.base)),
+                  patch("buzz_server.runtime.subprocess.Popen", side_effect=[profile, runtime]),
+                  patch("buzz_server.runtime.time.sleep")):
+                self.assertEqual(worker(store, "agent", dedicated=True), expected)
+            notify.assert_called_with("ready", ready=True)
+            self.assertEqual(ready_at_exit, [True])
+            self.assertEqual(runtime.terminate.call_count, int(stopping))
+            self.assertFalse((directory / "ready.json").exists())
+
     def test_runtime_launch_signal_stops_child_and_profile_has_no_provider_key(self):
         store = Store(self.base / "state")
         private_dir(store.directory("agent"))
