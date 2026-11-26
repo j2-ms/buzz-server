@@ -589,7 +589,9 @@ def latest(directory, current):
         denied()
 
 
-def download(directory, selected):
+def download(directory, selected, *, show_progress=False):
+    if show_progress:
+        print(f"Downloading and verifying Buzz Server {selected['version']}...", file=sys.stderr, flush=True)
     target = directory / ASSET
     fetch(binary_url(selected['version']), target, selected['size'])
     verify_download(target, selected)
@@ -606,7 +608,7 @@ def verify_download(target, selected):
         denied()
 
 
-def update(prefix):
+def update(prefix, *, show_progress=False):
     with locked(prefix) as prefix:
         m = manifest(prefix)
         inventory(prefix, m)
@@ -615,11 +617,15 @@ def update(prefix):
         original = (prefix / 'active').readlink()
     with tempfile.TemporaryDirectory(prefix='buzz-update-') as temp:
         directory = Path(temp)
+        if show_progress:
+            print('Checking for a newer stable Buzz Server release...', file=sys.stderr, flush=True)
         selected = latest(directory, m['version'])
         if selected is None:
             return {'version': m['version'], 'updated': False}
         selected = dict(selected)
-        target = download(directory, selected)
+        target = download(directory, selected, show_progress=show_progress)
+        if show_progress:
+            print(f"Activating Buzz Server {selected['version']}...", file=sys.stderr, flush=True)
         with locked(prefix):
             current = manifest(prefix)
             inventory(prefix, current)
@@ -630,6 +636,7 @@ def update(prefix):
             verify_download(target, selected)
             result = _install(target, prefix, current['state'], current['units'])
             result['updated'] = True
+            result['previous_version'] = current['version']
             return result
 
 
@@ -700,7 +707,8 @@ def before_command(prefix, operation, structured, tty, state, units, argv, now=N
             if sys.stdin.readline().strip().lower() not in ('y', 'yes'):
                 return
             approved_from = m['version']
-            target = download(directory, selected)
+            target = download(directory, selected, show_progress=True)
+            print(f"Activating Buzz Server {selected['version']}...", file=sys.stderr, flush=True)
             with locked(prefix, wait=0):
                 current = manifest(prefix)
                 inventory(prefix, current)
@@ -727,6 +735,8 @@ def before_command(prefix, operation, structured, tty, state, units, argv, now=N
                   '. Run buzz-server update to retry.', file=sys.stderr)
         return
     if path is not None:
+        print(f"Updated Buzz Server from {approved_from} to {selected['version']}. Workers were not restarted.",
+              file=sys.stderr, flush=True)
         # Keep exec errors outside best-effort update handling: never dispatch old
         # code after committing activation and failing to hand off the command.
         os.execv('/usr/bin/python3', ['/usr/bin/python3', '-I', str(path), *argv])

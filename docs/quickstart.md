@@ -1,15 +1,17 @@
 # Set up an agent
 
-Start with the [installation instructions](../README.md) under your operator
-login and an existing [dedicated account](service-accounts.md), for example
-`buzz-assistant`. Run the `buzz-server` commands from your operator login.
-Open a fresh login shell if it can't find `buzz-server` after installation:
+Start with the [installation instructions](../README.md#run-an-agent-from-your-operator-login).
+Run every `buzz-server` command from your unprivileged operator login. See
+[launcher and PATH recovery](releases.md#find-the-launcher) if the shell can't
+find the command.
 
-```sh
-buzz-server doctor --account buzz-assistant
-```
-
-`doctor` checks the local account and system manager, not relay or provider access.
+- **Same account.** The worker and Goose run as your login UID under a
+  `systemd --user` unit, with access to your login's files and other resources.
+  This route needs a working user manager, with no second account or sudo.
+- **Dedicated account (recommended for isolation).** A system unit runs the
+  worker and Goose at the UID of a
+  [pre-existing unprivileged account](service-accounts.md), such as
+  `buzz-assistant`. Use explicit operator sudo when asked for privileged actions.
 
 Before creating an agent, confirm that your relay accepts a new public key
 without owner attestation (NIP-OA). Ask the relay operator if you don't know the
@@ -28,26 +30,49 @@ accepts 64 lowercase hex characters or a valid `npub`. Keep your private key
 
 ## Create and configure
 
-Create a stopped agent from the operator login:
+Run the preflight for your route, then create a stopped agent. The same-account
+preflight checks the user manager and local runtime tools. The dedicated
+preflight checks the account layout and system manager without sudo. Both are
+local checks. Provider access and relay admission are checked separately.
+
+**Same account**
 
 ```sh
+buzz-server doctor
+buzz-server create assistant
+```
+
+**Dedicated account**
+
+```sh
+buzz-server doctor --account buzz-assistant
 buzz-server create assistant --account buzz-assistant
-buzz-server show assistant
-buzz-server inference configure assistant
 ```
 
 The guided prompts ask for the name, optional profile details, operator public
-key, relay and a single-line system prompt. Account selection is explicit in
-`--account`; paths and pinned tools are automatic. Empty optional answers use
-shown defaults. Ctrl+C, Ctrl+D or declining confirmation discards the choices.
-Authorize fixed system tools through ordinary sudo when requested; do not run
-the CLI itself as root or install it under the agent account. Goose setup runs
-at the target UID with that agent's private HOME, not the operator's settings.
-It does not grant the agent sudo. Choose Goose's mode explicitly: auto executes
-enabled tools without per-call approval, so use it only for an account and
-workspace whose permissions you authorize. Modes that ask at runtime can block
-unattended responses. A cancelled wizard may exit successfully without readiness;
-rerun `buzz-server inference configure assistant` and finish setup before starting.
+key, relay and a single-line system prompt. Guided creation selects tool and
+state paths for the chosen route. Empty optional answers use the shown defaults.
+Ctrl+C, Ctrl+D or declining confirmation discards the choices.
+On the dedicated route, authorize fixed system tools through ordinary operator
+sudo when requested. The dedicated agent receives neither the management CLI
+nor a sudo grant. To supply an explicit Goose path for the same-account route
+or automate creation, see the [configuration-file method](#configuration-file-method).
+
+### Configure Goose
+
+For either route, keep the agent stopped and run this in your operator terminal:
+
+```sh
+buzz-server inference configure assistant
+```
+
+Goose uses a private per-agent HOME. The wizard runs at your login UID for a
+same-account agent and at the bound target UID for a dedicated agent. Choose
+Goose's mode explicitly. Auto executes enabled tools without per-call approval,
+so use it only for an account and workspace whose permissions you authorize.
+Modes that ask at runtime can block unattended responses. A cancelled wizard
+may exit successfully. If you cancelled, rerun
+`buzz-server inference configure assistant` and finish setup before starting.
 
 ### Custom OpenAI-compatible endpoint
 
@@ -68,7 +93,21 @@ your model and finish the wizard.
 
 ## Admit the key and start
 
-Copy the hex public key printed as `Buzz identity:` in `buzz-server show assistant`.
+Get the agent's hex public key from `data.identity` on either route:
+
+```sh
+buzz-server --json show assistant
+```
+
+On either route, `buzz-server show assistant` also prints the key as
+`Buzz identity:`. Replace the placeholder below with its 64-character hex
+value. Set it in each shell that runs the examples, or substitute the actual
+public key for `"$AGENT_PUBKEY"` in each command.
+
+```sh
+AGENT_PUBKEY='paste-the-agent-hex-public-key-here'
+```
+
 On a membership-gated relay, give the administrator this public key and the
 community name before the first start. Ask them to admit it as a regular relay
 member under the existing policy. For example, on a compatible self-hosted
@@ -81,8 +120,8 @@ buzz-admin add-member --pubkey "$AGENT_PUBKEY" --role member
 
 This command admits the key without joining default channels. Invite claims
 and some other administrator add paths may auto-join channels. Buzz Server
-v0.2.0 and this workflow do not supply owner attestation for a relay that
-requires it.
+does not supply owner attestation (NIP-OA). A relay that requires it for this
+agent is unsupported.
 
 Start from the Linux operator login. You can do this before choosing a channel:
 
@@ -103,17 +142,24 @@ relay from the operator's Buzz identity:
 buzz users get --pubkey "$AGENT_PUBKEY"
 ```
 
-Check that the returned `pubkey` matches `Buzz identity:` from Buzz Server.
+Check that the returned `pubkey` matches the agent key you copied.
 
 ## First reply
+
+For the CLI examples, run `buzz channels list` against the same community and
+copy the `channel_id` UUID for your test channel. Set it in the shell with
+`AGENT_PUBKEY`, or substitute the UUID for `"$CHANNEL_ID"` in each command.
+
+```sh
+CHANNEL_ID='paste-the-test-channel-uuid-here'
+```
 
 1. In Buzz Desktop 0.5.30, select the same community and open your test channel.
    Open **Channel members**, then search for the existing agent under **Add
    people and agents** using the display name from the verified profile. It
    can appear as a regular member. Select **Add** on that result and confirm
    it appears in the channel members. Use `buzz channels members --channel
-   "$CHANNEL_ID"` to verify the added key against the `Buzz identity:` printed
-   by Buzz Server.
+   "$CHANNEL_ID"` to verify the added key against `AGENT_PUBKEY`.
 2. If the agent does not appear, confirm the community, your permission to add
    members, the exact key's relay admission, and the startup status. Repeat
    the profile lookup above. Use the CLI alternative if the exact profile is
@@ -142,19 +188,40 @@ Check that the returned `pubkey` matches `Buzz identity:` from Buzz Server.
 
    Use the event ID returned by `send`. If you only see your message, refresh the
    thread or repeat the thread query every 10–15 seconds for up to a minute
-   before treating it as a no-reply case. This is a first check, not a response
-   deadline; allow longer if your model is known to be slow. A running service
-   is not a posted reply.
+   before following [If no reply appears](#if-no-reply-appears). Allow longer
+   if your model is known to be slow.
+
+### If no reply appears
+
+Wait and check the original thread as described above before sending another
+mention.
+
+1. Check the receiving relay and channel. Ask the relay operator to confirm
+   that the agent key is admitted, and verify channel membership for that
+   exact key.
+2. Confirm you sent the mention from the hex public key in `owner` and
+   targeted the exact agent key.
+3. Check `buzz-server status assistant` and fix startup failures first. For a
+   same-account agent, `buzz-server logs assistant` shows sanitized lifecycle
+   events. Dedicated agents report startup stages in status.
+4. To redo provider setup, run `buzz-server stop assistant`, then
+   `buzz-server inference configure assistant`, then `buzz-server start assistant`.
+   If Goose already has a configuration, choose **Configure Providers** and
+   continue with the [provider selection](#custom-openai-compatible-endpoint).
+5. If the original thread still has no reply, retry once with a synthetic
+   message asking the agent to post in the original thread. Publishing a reply
+   requires the Buzz messaging tool. If it still fails, report CLI and Goose
+   versions, lifecycle status and what each check established. Keep prompts,
+   keys, provider settings and private logs private.
 
 ## Alternatives
 
-For the nonisolated same-account alternative, omit `--account` during creation
-and use `doctor` without `--account`. Existing user-service data and scripted
-commands retain their behavior. See the [account guide](service-accounts.md).
-
 ### Configuration-file method
 
-1. Run `install -d -m 700 "$HOME/.config/buzz-server"`. Set `umask 077`, then create `agent.json` and `prompt.txt` in that directory with mode `0600`. Put the system prompt in `prompt.txt`. Do not put keys in command arguments, shell history, or agent JSON.
+1. Run `install -d -m 700 "$HOME/.config/buzz-server"`. Set `umask 077`, then
+   create `agent.json` and `prompt.txt` there with mode `0600`. Put the system
+   prompt in `prompt.txt`. Keep private keys and credentials out of arguments,
+   shell history and agent JSON.
 2. Save the following as `agent.json`. Replace the relay URL, owner **public** key (64 lowercase hex characters), and absolute paths. The owner is the Buzz identity allowed to prompt this agent.
 
    ```json
@@ -170,60 +237,51 @@ commands retain their behavior. See the [account guide](service-accounts.md).
 
    The dedicated route replaces the harness path with its pinned staged Goose;
    only the prompt path must exist under the operator login. The same-account
-   alternative uses the supplied absolute Goose path as before.
+   route uses the supplied absolute Goose executable. On that route use
+   `buzz-server doctor --config FILE` to check that executable.
 
-3. Create the stopped agent and copy its public key from the `Buzz identity:`
-   line in `show` (`identity` in JSON output). Use this key as `AGENT_PUBKEY`
-   below:
+3. Set `config="$HOME/.config/buzz-server/agent.json"` in your terminal, then
+   run the command for your route.
+
+   **Same account**
 
    ```sh
-   config="$HOME/.config/buzz-server/agent.json"
+   buzz-server create assistant --config "$config"
+   ```
+
+   **Dedicated account**
+
+   ```sh
    buzz-server create assistant --account buzz-assistant --config "$config"
-   buzz-server show assistant
    ```
 
-4. Run Goose setup in a terminal from the operator login. The CLI changes to the bound target UID with a clean environment. Complete Goose's provider, model and credential prompts:
-
-   ```sh
-   buzz-server inference configure assistant
-   ```
-
-5. Continue with [Admit the key and start](#admit-the-key-and-start).
-
-### If no reply appears
-
-If you haven't already waited and checked the original thread as described
-above, do that before sending another mention.
-
-1. Check the receiving relay and channel. Ask the operator to confirm that the
-   agent key is admitted, and verify channel membership for that exact key.
-2. Confirm you sent the mention from the hex public key in `owner`, and that the
-   mention targeted the agent's public key, not a similarly named account.
-3. Check `buzz-server status assistant`. Dedicated lifecycle logs are not exposed by this version.
-   Fix startup failures first. Lifecycle logs do not expose model output or
-   credentials. To redo provider setup, run `buzz-server stop assistant`, then
-   `buzz-server inference configure assistant`, then `buzz-server start assistant`.
-   If Goose already has a configuration, choose **Configure Providers** instead
-   of **Manual Configuration** and continue with the provider selection above.
-4. If steps 1–3 check out and the original thread still has no reply, retry once with a synthetic message explicitly asking
-   the agent to post in the original thread. Plain model text alone is not
-   published; the harness needs to use the Buzz messaging tool path. If it still
-   fails, report the CLI/Goose versions, lifecycle status and what each check
-   established. Do not share prompts, keys, provider settings, or private logs.
+4. [Configure Goose](#configure-goose), then continue with
+   [Admit the key and start](#admit-the-key-and-start) to get the public key.
 
 ## Operate and recover
 
 - `list` shows agents bound to this operator and existing same-account agents. `logs` is available for same-account lifecycle events only. For automation put `--json` **before** the subcommand; successes go to stdout and errors to stderr.
 - After editing the JSON or prompt, run `buzz-server configure assistant --config "$config"`. This replaces the full configuration, preserves the agent key, and restarts an agent set to run. An intentionally stopped agent stays stopped. This command does not run Goose setup.
-- `start` enables the service for future boots. A new dedicated service waits
-  for profile publication and a locally running worker. The CLI observes
+- `start` enables the unit in its manager. Same-account services use
+  `systemd --user` and depend on the operator's user manager. Dedicated services
+  use the system manager. For logout and reboot verification see
+  [issue #4](https://github.com/j2-ms/buzz-server/issues/4).
+  A new dedicated service waits for profile publication and a locally running
+  worker. The CLI observes
   startup for up to ten seconds while systemd can continue trying in the
   background. Systemd allows four starts in five minutes, including restarts
   after runtime crashes, and stops sooner on a classified refusal. Use
   `buzz-server status assistant` to see
   the latest stage, `buzz-server stop assistant` to cancel, or `buzz-server
   start assistant` after correcting a failure.
-- `buzz-server delete assistant` verifies stop and removes the system unit and target definition. It retains the key, credentials and work under the bound target home, plus the private operator binding/removal proof. The ID stays reserved. It does not remove the Linux account or Buzz history. Same-account retained data stays under `${XDG_DATA_HOME:-$HOME/.local/share}/buzz-server`.
+- `buzz-server delete assistant` verifies stop and removes the managed unit and
+  agent definition. For a same-account agent, it retains the key, prompt,
+  Goose credentials and work in the operator's agent state directory (by
+  default under `${XDG_DATA_HOME:-$HOME/.local/share}/buzz-server/agents`).
+  For a dedicated agent, it retains the private state and staged worker/tools
+  under the bound account's home, plus the operator binding and removal proof.
+  The retained data reserves the ID on both routes. Linux accounts and past
+  Buzz messages are retained.
 - Updating or reinstalling the operator CLI does not update staged dedicated workers or tools. There is no fleet upgrade mechanism. Keep the operator state/bindings and do not edit units by hand. CLI uninstall refuses dedicated bindings until delete is verified; incomplete create/delete operations must be retried first. Same-account `start` still refreshes its user unit after a CLI reinstall.
 - Loaded unit overrides are not supported. A conflict blocks management commands, including `stop`, `status`, and `show`, and can make `list` fail even when other agents are unaffected. Shared overrides in `service.d/` or `buzz-server-.service.d/` on the applicable manager's search path can affect every managed agent. Inspect the conflicts with `systemctl --system cat UNIT` using the exact `unit` in JSON status; use `systemctl --user cat buzz-server-<id>.service` for same-account units. Ask the administrator responsible for the override to remove the conflict, reload that manager, and retry `stop` before deleting anything. A failed stop is not proof the agent is down.
 

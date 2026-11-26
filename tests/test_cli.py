@@ -19,6 +19,28 @@ from buzz_server.storage import Store, atomic, private_dir, read_private
 from buzz_server.supervisor import PreexistingUnit, Systemd, quote
 
 
+class ParserTests(unittest.TestCase):
+    def test_command_help(self):
+        parser = cli.parser()
+        commands = ('version', 'install', 'update', 'uninstall', 'doctor', 'list', 'create',
+                    'configure', 'show', 'status', 'start', 'restart', 'stop', 'logs', 'delete',
+                    'inference', 'account-plan')
+        top = parser.format_help()
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertRegex(top, rf'(?m)^    {command}\s+[A-Z]\S+')
+        for args in ([], ['update']):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exited:
+                parser.parse_args([*args, '--help'])
+            self.assertEqual(exited.exception.code, 0)
+            help_text = ' '.join(output.getvalue().split())
+            self.assertTrue(help_text.startswith('usage: buzz-server '))
+            for detail in ('buzz-server list', '24 hours', 'Help and version stay offline',
+                           'JSON and redirected runs skip offers', 'update --auto on'):
+                self.assertIn(detail, help_text)
+
+
 class FakeSystemd:
     """Unit-test double only. Never used by disposable acceptance."""
     active = False
@@ -96,6 +118,38 @@ class CliTests(unittest.TestCase):
 
     def create(self):
         return self.call("create", "agent", "--config", str(self.config_path))
+
+    def test_doctor_plain_progress_and_verdict(self):
+        argv = ['--state-dir', str(self.root), '--unit-dir', str(self.units), 'doctor',
+                '--config', str(self.config_path)]
+        out, err = io.StringIO(), io.StringIO()
+
+        def check_manager():
+            self.assertIn('Checking the systemd user manager', err.getvalue())
+
+        def check_interface(*args):
+            self.assertIn('Checking local Buzz, buzz-acp, Goose and OpenSSL', err.getvalue())
+
+        with (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
+              patch('buzz_server.dependencies.interactive', return_value=True),
+              patch.object(FakeSystemd, 'check', side_effect=check_manager),
+              patch('buzz_server.runtime.tool', return_value='/usr/bin/true'),
+              patch('buzz_server.dependencies.probe', side_effect=check_interface) as probe):
+            self.assertEqual(cli.main(argv), 0, err.getvalue())
+        self.assertEqual(probe.call_count, 4)
+        self.assertIn('Local preflight passed', out.getvalue())
+        self.assertIn('Goose executable: /usr/bin/true', out.getvalue())
+        self.assertIn('relay access and Buzz replies were not checked', out.getvalue())
+
+        out, err = io.StringIO(), io.StringIO()
+        with (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
+              patch.object(FakeSystemd, 'check', side_effect=Error('supervisor_unavailable', 'Check the user manager.')),
+              patch('buzz_server.dependencies.probe') as probe):
+            self.assertEqual(cli.main(argv), 1)
+        probe.assert_not_called()
+        self.assertEqual(out.getvalue(), '')
+        self.assertTrue(err.getvalue().startswith('Local preflight failed [supervisor_unavailable]: Check the user manager.'))
+        self.assertIn('relay access and Buzz replies were not checked', err.getvalue())
 
     def guided(self, answers):
         out, err = io.StringIO(), io.StringIO()
