@@ -99,10 +99,10 @@ Get the agent's hex public key from `data.identity` on either route:
 buzz-server --json show assistant
 ```
 
-For a dedicated agent, `buzz-server show assistant` also labels it
-`Buzz identity:`. Copy the key and replace the placeholder below with the
-64-character hex value. Set it in each shell that runs the examples, or
-substitute the actual public key for `"$AGENT_PUBKEY"` in each command.
+On either route, `buzz-server show assistant` also prints the key as
+`Buzz identity:`. Replace the placeholder below with its 64-character hex
+value. Set it in each shell that runs the examples, or substitute the actual
+public key for `"$AGENT_PUBKEY"` in each command.
 
 ```sh
 AGENT_PUBKEY='paste-the-agent-hex-public-key-here'

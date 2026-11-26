@@ -153,6 +153,10 @@ arguments. That retry clears abandoned private staging under `STATE_DIR/tools/`
 and completes only the missing tools. The `.stage-*` namespace there is reserved
 for installer scratch; do not store operator data in it.
 
+Tool detection checks availability. Verify upstream artifacts and check
+compatibility on a fresh host separately from synthetic tests. Provider and
+relay readiness require their own checks.
+
 Managed downloads and private agent state remain on application uninstall.
 Dependencies have no manifest, background acquisition or update mechanism.
 Private-tool cleanup is a separate deliberate operation: stop all agents using
