@@ -166,11 +166,16 @@ buzz-server uninstall
 ```
 
 `--json` before the subcommand preserves the v1 stdout/stderr contract.
-`--version` and `version` are offline. Built-in update checks and downloads use
-the same fixed anonymous HTTPS contract as the bootstrap above. No GitHub login
-or default credential file is consulted. Offline, rate-limit or unavailable-release
-errors leave the previous CLI usable. Explicit updates
-report sanitized errors; automatic check failures stay quiet.
+Bare `buzz-server`, `-v`, `--version`, `version` and command help stay offline so
+you can get the installed version or usage without waiting for a network check.
+Built-in update checks and downloads use the same fixed anonymous HTTPS contract
+as the bootstrap above. No GitHub login or default credential file is consulted.
+Offline, rate-limit or unavailable-release
+errors leave the previous CLI usable. Explicit updates report the applied version
+change, that the installed version is current, or a sanitized failure. Interactive
+updates show progress before checking, downloading and verifying, and activating.
+Offers stay quiet until a newer release is available, then show download and
+activation progress after consent.
 An already verified local artifact can also run `install --prefix SAME_PREFIX`.
 An active installation cannot downgrade.
 `buzz-server update` updates the management CLI, not privately installed runtime tools.
@@ -185,17 +190,21 @@ using that installation before upgrading. Old code already in memory keeps its
 old behavior; the new CLI cannot replace it. After upgrading, use `update --auto on`
 if you want the new interactive offers.
 
-Before a due ordinary command with stdin, stdout and stderr all terminals, the CLI
-synchronously checks for a newer stable release and offers it before dispatch.
+With offers enabled, an installed command such as `buzz-server list` or
+`buzz-server status ID` can check for a newer stable release and offer it before
+running. All three streams (stdin, stdout and stderr) must be terminals, so offers
+skip JSON and redirected invocations and avoid interrupting scripts.
 Only `y` or `yes` (case insensitive, surrounding whitespace ignored) accepts;
 EOF and every other answer decline. The exact checked version, asset ID, digest
-and size bind the download. Metadata checks, declines and outages are throttled
-once daily, including the first synchronous check. Explicit `update` is the
-unthrottled retry. If a confirmed update cannot be applied, a brief diagnostic
-explains how to retry before the original command runs once with the installed
-CLI. Ctrl-C aborts before dispatch. JSON, redirected streams,
-help/version, workers, explicit maintenance commands, root, source invocations
-and invalid installation bindings never offer updates.
+and size bind the download. The first eligible command checks when due. That
+metadata attempt starts the 24-hour interval even if you decline, an outage
+prevents a result, or the CLI is already current. `buzz-server update` checks
+immediately regardless of the interval or offer preference. If a confirmed update
+cannot be applied, a brief diagnostic explains how to retry. The original command
+then runs once with the installed CLI. Ctrl-C aborts before dispatch.
+Workers, `doctor --account`, `account-plan`, explicit maintenance commands,
+root, source invocations and invalid
+installation bindings also skip offers.
 
 Accepted activation executes the verified immutable new zipapp with the original
 arguments once. It does not restart workers. Exec failure reports a command error

@@ -77,12 +77,15 @@ The source-installer acceptance mode remains available without `--releases`.
 Independent review, both disposable modes, public anonymous asset downloads,
 a fresh OS install and live provider/relay verification remain separate gates.
 
-## Pre-command update consent (offline)
+## Installed CLI and update consent (offline)
 
-`tests/test_update_pty.py` builds two synthetic zipapps, replaces only their fixture
-transport and dispatch, and runs real terminal subprocesses. It checks acceptance,
-decline, failed download, JSON and non-TTY behavior, exact original argv and one
-observable dispatch side effect. It does not invoke systemd or contact GitHub.
+`tests/test_update_pty.py` installs two synthetic zipapps with a local release
+fixture and runs the launcher in a real terminal. It checks offline help and
+version shortcuts, offer eligibility and consent, dispatch once with the exact
+original arguments, and explicit updates during the daily offer throttle.
+A blocked metadata response verifies that progress arrives before the response.
+The tests also cover failed downloads, already-current output, and JSON and
+non-TTY behavior. They do not invoke systemd or contact GitHub.
 `tests/test_release.py` covers activation races, lock-free requests, installed
 artifact verification, old probe no-op handling, preferences and interruption.
 Run serially with the full bounded unittest command below; no live acceptance

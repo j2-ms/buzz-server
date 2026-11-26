@@ -21,9 +21,22 @@ class Parser(argparse.ArgumentParser):
         raise Error("usage", "Invalid command arguments. Run buzz-server --help or buzz-server COMMAND --help.")
 
 
+UPDATE_OFFERS = (
+    "When enabled, commands like 'buzz-server list' can offer a verified update before running. "
+    "Offers require terminal stdin, stdout and stderr and your consent. The first eligible command "
+    "checks when due, at most once every 24 hours even if the check fails or you decline. Help and "
+    "version stay offline for quick use. JSON and redirected runs skip offers to avoid interrupting "
+    "scripts. Run 'buzz-server update' to check now, regardless of the offer preference or daily "
+    "limit. 'buzz-server update --auto on' enables offers without checking now."
+)
+DOCTOR_SCOPE = "Worker startup, provider access, credentials, relay access and Buzz replies were not checked."
+
+
 def parser():
-    p = Parser(description="Manage headless Buzz agents with native systemd services.")
-    p.add_argument("--version", action="version", version=__version__)
+    p = Parser(prog="buzz-server", description="Manage headless Buzz agents with native systemd services.",
+               epilog=UPDATE_OFFERS)
+    p.add_argument("-v", "--version", action="version", version=__version__,
+                   help="Show the installed version offline, as when invoked without arguments")
     p.add_argument("--json", action="store_true", help="Versioned JSON response, including errors")
     p.add_argument("--state-dir", default=str(Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "buzz-server"))
     p.add_argument("--unit-dir", default=str(Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user"))
@@ -34,18 +47,30 @@ def parser():
     choice = sub.add_mutually_exclusive_group()
     choice.add_argument("--install-dependencies", action="store_true", help="Acquire missing pinned runtime tools privately")
     choice.add_argument("--skip-dependencies", action="store_true", help="Suppress optional runtime tool prompt")
-    for op in ("update", "uninstall"):
-        sub = commands.add_parser(op)
-        sub.add_argument("--prefix", help="Installed prefix; defaults to this installation")
-        if op == "update":
-            sub.add_argument("--auto", choices=("on", "off"), help="Enable/disable interactive update offers; does not check now")
-    doctor = commands.add_parser("doctor", help="Verify the user manager and installed runtime interface without connecting to a relay")
+    sub = commands.add_parser("update", help="Check now and apply a verified stable CLI upgrade",
+                              description="Update the management CLI without restarting workers.", epilog=UPDATE_OFFERS)
+    sub.add_argument("--prefix", help="Installed prefix; defaults to this installation")
+    sub.add_argument("--auto", choices=("on", "off"), help="Change the interactive offer preference without checking now")
+    sub = commands.add_parser("uninstall", help="Stop and remove same-account units and uninstall the CLI, retaining private data")
+    sub.add_argument("--prefix", help="Installed prefix; defaults to this installation")
+    doctor = commands.add_parser("doctor", help="Check local runtime prerequisites or preflight a dedicated account")
     checks = doctor.add_mutually_exclusive_group()
     checks.add_argument("--config", help="Private agent JSON; check its configured absolute Goose path")
     checks.add_argument("--account", help="Check an existing dedicated account and system manager instead of the operator user manager")
     commands.add_parser("list", help="List managed agents and observed service state")
-    for op in ("create", "configure", "show", "status", "start", "restart", "stop", "logs", "delete"):
-        sub = commands.add_parser(op)
+    agent_commands = {
+        "create": "Create an agent with a new identity and leave it stopped",
+        "configure": "Replace an agent's configuration, restarting it if running",
+        "show": "Show an agent's identity, configuration summary and service state",
+        "status": "Show an agent's requested and observed service state",
+        "start": "Start an agent worker",
+        "restart": "Stop and start an agent worker",
+        "stop": "Stop an agent worker",
+        "logs": "Show sanitized lifecycle events",
+        "delete": "Stop and remove an agent from management, retaining private data",
+    }
+    for op, help_text in agent_commands.items():
+        sub = commands.add_parser(op, help=help_text)
         sub.add_argument("id", type=agent_id)
         if op in ("create", "configure"):
             sub.add_argument("--config", required=(op == "configure"), help="Private JSON configuration file; configure replaces the complete config")
@@ -127,11 +152,18 @@ def execute(args):
             return release.uninstall(prefix)
         if args.auto:
             return release.set_auto(prefix, args.auto == "on")
-        return release.update(prefix)
+        data = release.update(prefix, show_progress=not args.json and dependencies.interactive())
+        if args.json:
+            data.pop("previous_version", None)
+        return data
     if args.operation == "inference" and (args.json or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))):
         raise Error("interactive_required", "Goose setup requires an interactive terminal on stdin/stdout/stderr and cannot run with --json.")
     if args.operation == "create" and not args.config and (args.json or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))):
         raise Error("interactive_required", "Guided creation requires a terminal on stdin/stdout/stderr; use --config for JSON or non-interactive creation.")
+    doctor_progress = args.operation == "doctor" and not args.json and dependencies.interactive()
+    if doctor_progress:
+        check = "dedicated account layout" if args.account else "systemd user manager"
+        print(f"Checking the {check}...", file=sys.stderr, flush=True)
     store = Store(args.state_dir)
     from . import account_lifecycle
     from .accounts import Bindings, account
@@ -145,6 +177,8 @@ def execute(args):
                                               Path(selected.data) / "state", selected)
     if args.operation == "doctor" and args.account:
         entry = account(args.account, diagnose=True)
+        if doctor_progress:
+            print("Checking the systemd system manager...", file=sys.stderr, flush=True)
         from .account_process import run
         result = run(["/usr/bin/systemctl", "--system", "show", "--property=Version", "--value"],
                      env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}, cwd="/", umask=0o077)
@@ -233,6 +267,8 @@ def execute(args):
             return {"id": args.id, "events": events[-args.lines:], "source": "sanitized_lifecycle"}
         supervisor.check()
         if args.operation == "doctor":
+            if doctor_progress:
+                print("Checking local Buzz, buzz-acp, Goose and OpenSSL interfaces...", file=sys.stderr, flush=True)
             from .runtime import tool, executable
             buzz = tool("buzz", store.root)
             acp = tool("buzz-acp", store.root)
@@ -391,10 +427,23 @@ def render(operation, data):
         return "\n".join(f"{a['id']}  observed {a['service_state']}  operator requested {a['desired']}  identity={a['identity']}" for a in data["agents"])
     if operation == "logs":
         return "\n".join(f"{e['time']} {e['event']}" for e in data["events"]) or "No lifecycle events yet."
-    if operation == "doctor" and "service_account" in data:
-        name = data["service_account"]["name"]
-        return (f"Dedicated-account preflight passed for {name}. Account layout and system manager reachability verified.\n"
-                f"Next, run buzz-server create AGENT --account {name} and follow docs/quickstart.md.")
+    if operation == "update":
+        if "updated" not in data:
+            if data["auto_update"]:
+                return "Interactive update offers enabled. Run buzz-server update to check now."
+            return "Interactive update offers disabled. Run buzz-server update to check manually."
+        if data["updated"]:
+            return (f"Updated Buzz Server from {data['previous_version']} to {data['version']}. "
+                    "Workers were not restarted.")
+        return f"Buzz Server {data['version']} is already current. No newer stable release was found."
+    if operation == "doctor":
+        if "service_account" in data:
+            name = data["service_account"]["name"]
+            return (f"Dedicated-account preflight passed for {name}. Account layout and system manager reachability verified.\n"
+                    f"Runtime tools were not checked. {DOCTOR_SCOPE}\n"
+                    f"Next, run buzz-server create AGENT --account {name} and follow docs/quickstart.md.")
+        return ("Local preflight passed. The systemd user manager and local Buzz, buzz-acp, Goose and "
+                f"OpenSSL secp256k1 interfaces were verified.\nGoose executable: {data['goose_path']}\n{DOCTOR_SCOPE}")
     if "service_state" in data:
         heading = (f"{data['id']}: created and left stopped." if operation == "create" else
                    f"{data['id']}: systemd reports {data['service_state']}; operator requested {data['desired']}.")
@@ -433,11 +482,15 @@ def render(operation, data):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        print(__version__)
+        return 0
     structured = "--json" in argv
     operation = "unknown"
     try:
         args = parser().parse_args(argv)
         operation = args.operation
+        structured = args.json
         prefix = release.location()
         ordinary = operation not in ("install", "update", "uninstall", "version", "account-plan")
         if operation != "doctor" or not args.account:
@@ -464,5 +517,11 @@ def main(argv=None):
     if structured:
         print(json.dumps({"schema_version": 1, "operation": operation, "ok": False, "error": {"code": code, "message": message}}, sort_keys=True), file=sys.stderr)
     else:
-        print(f"Error [{code}]: {message}", file=sys.stderr)
+        heading = "Error"
+        if operation == "doctor":
+            heading = "Dedicated-account preflight failed" if args.account else "Local preflight failed"
+            message += f"\nPreflight did not complete. {DOCTOR_SCOPE}"
+        elif operation == "update":
+            heading = "Could not change interactive update offers" if args.auto else "Buzz Server update failed"
+        print(f"{heading} [{code}]: {message}", file=sys.stderr)
     return 1
