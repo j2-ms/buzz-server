@@ -1,8 +1,12 @@
 # Contributing
 
-Use a topic branch and open a pull request for review. Describe the operator-visible change, the checks you ran, and what remains untested. File ordinary bugs in [GitHub Issues](https://github.com/j2-ms/buzz-server/issues) with versions, steps, and sanitized output.
+Use a topic branch and open a pull request for review. Describe the operator-visible change, the checks you ran, and what remains untested. File ordinary bugs in [GitHub Issues](https://github.com/j2-ms/buzz-server/issues) with versions, steps, and sanitized output. Use [GitHub Discussions](https://github.com/j2-ms/buzz-server/discussions) for setup questions and reports from other environments.
 
 For a security concern, use private vulnerability reporting under the repository's Security tab if available. Otherwise, open an issue asking for a private contact without describing the finding. Do not post credentials, private prompts, or vulnerability details in an issue or pull request.
+
+## Maintenance
+
+Buzz Server has one human maintainer and uses AI-assisted development. Merges and releases remain human decisions. If the maintainer is unavailable, reviews and releases may pause; there is no guaranteed support or release schedule.
 
 ## Develop and verify
 
