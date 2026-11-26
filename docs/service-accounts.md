@@ -1,9 +1,18 @@
 # Linux service accounts
 
-The recommended route keeps Buzz Server's user-local management CLI under the
-operator login and runs each agent in a different existing unprivileged account.
+Install and run the user-local management CLI from your unprivileged operator
+login. Choose the account that will run the agent.
+
+- **Same account.** Use your login's working `systemd --user` manager, with no
+  second account or sudo. The agent shares your login's files and authority.
+- **Dedicated account (recommended for isolation).** Run the agent under a
+  pre-existing unprivileged account using the system manager. Privileged actions
+  require explicit operator sudo. The dedicated `doctor` check runs without sudo.
+
 The `owner` configuration field is a **Buzz public key**, separate from the
 Linux account and generated agent identity.
+
+## Dedicated account
 
 Ask the host administrator to supply one dedicated account per agent, with a
 nonzero UID/GID distinct from the operator, a real private mode-0700 home and
@@ -127,3 +136,7 @@ the administrator if needed. The CLI grants no sudo and changes no linger policy
 Existing guided creation, JSON/config-file commands and same-account update and
 uninstall remain available. Same-account unit refresh on start differs from the
 frozen dedicated worker/tool payload described above.
+
+For either route, follow the [quickstart](quickstart.md#create-and-configure)
+from preflight and creation through shared Goose setup, relay admission and a
+first reply.

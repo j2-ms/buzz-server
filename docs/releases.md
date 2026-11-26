@@ -1,8 +1,10 @@
 # Release installation and updates
 
-Linux, `/usr/bin/python3` 3.12+, and a working
-unprivileged systemd user session are required. Compatible manually installed Buzz, buzz-acp and Goose are reused unchanged.
-Optional private prerequisite downloads never change host services.
+Install from an unprivileged Linux login with `/usr/bin/python3` 3.12+.
+The README bootstrap command also uses Bash and curl, and its HTTPS downloads
+use the system CA bundle. The CLI installs in user-local directories without
+sudo or a systemd session. Runtime requirements depend on the
+[chosen account route](service-accounts.md).
 
 ## First install
 
@@ -76,6 +78,19 @@ components. Do not use a source installation's prefix. An already verified offli
 /usr/bin/python3 -I buzz-server.pyz install --prefix "$HOME/.local/buzz-server-cli"
 ```
 
+### Find the launcher
+
+The default installation adds `~/.local/bin/buzz-server`. If the shell cannot
+find `buzz-server`, open a fresh login shell. Check the launcher directly:
+
+```sh
+"$HOME/.local/bin/buzz-server" --version
+```
+
+If that succeeds, ensure `$HOME/.local/bin` is on your login shell's PATH.
+For a custom prefix, use that prefix's `bin/buzz-server`. The version check is
+offline and independent of runtime preflight.
+
 ### Optional private prerequisites
 
 Default installation downloads only verified Buzz Server. If tools are missing
@@ -138,15 +153,6 @@ arguments. That retry clears abandoned private staging under `STATE_DIR/tools/`
 and completes only the missing tools. The `.stage-*` namespace there is reserved
 for installer scratch; do not store operator data in it.
 
-Presence alone does not prove compatibility or relay/provider readiness. Set
-`harness.command` in the [agent JSON](quickstart.md) to the reported exact absolute
-Goose path and pass that file with `--config`. Run the installed
-`bin/buzz-server doctor` next; `doctor --config FILE` uses and reports the resolved
-configured Goose path. Doctor checks local interfaces, never credentials or a
-live provider/relay. Agent creation and Goose configuration remain separate.
-Verify upstream artifacts and fresh-host compatibility separately; synthetic
-tests establish neither.
-
 Managed downloads and private agent state remain on application uninstall.
 Dependencies have no manifest, background acquisition or update mechanism.
 Private-tool cleanup is a separate deliberate operation: stop all agents using
@@ -155,6 +161,21 @@ its `tools` directory when those binaries are no longer needed. Never remove the
 state root or agent directories to clean up dependencies. After a forced kill,
 abandoned private `STATE_DIR/tools/.stage-*` directories may also need removal
 once no install is running.
+
+### Runtime preflight
+
+For a same-account agent, run `buzz-server doctor` from your operator login
+with a working systemd user manager. It checks local tool interfaces using the
+standard tool lookup. Guided creation uses that lookup and needs no agent JSON.
+If you have an [agent JSON file](quickstart.md#configuration-file-method) with
+an explicit absolute `harness.command`, run `buzz-server doctor --config FILE`
+to check and report that Goose executable.
+
+For a dedicated agent, run `buzz-server doctor --account ACCOUNT`. It checks
+the pre-existing account's layout and system manager reachability without sudo.
+Runtime tool checks for this route are separate from this preflight. Both
+`doctor` routes leave provider credentials, relay access and replies untested.
+Continue with [agent setup](quickstart.md#create-and-configure).
 
 ## Upgrade and remove
 
@@ -280,7 +301,9 @@ candidate file, supply synthetic GitHub responses
 through injected synthetic transport, and execute that verified local file into a disposable prefix.
 They exercise state binding and retry without GitHub publication or systemd.
 Verify public anonymous download, a fresh Ubuntu install, upstream interfaces,
-first-use setup and a real signed reply separately.
+first-use setup and a real signed reply separately. The
+[verification guide](testing.md#what-the-tests-prove) describes the v0.3.0
+first-reply trial and what it covered.
 Do not create a draft/prerelease as an updater test channel. No workflow,
 repository setting or alternate hosting channel is introduced.
 
@@ -294,5 +317,3 @@ contains the same SHA-256 digest and size. Missing or invalid GitHub digests are
 rejected by the updater. No alternate endpoints or update servers are supported.
 No publishing, tagging, service changes or live provider/relay calls occur in the
 builder or unit tests. See [verification](testing.md) for outstanding gates.
-
-For the default prefix the installer adds `~/.local/bin/buzz-server`. If your shell does not find it, run `"$HOME/.local/bin/buzz-server" doctor` and consult your distribution’s instructions for enabling `~/.local/bin` on PATH. Custom prefixes use their own `bin/buzz-server`.
