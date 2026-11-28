@@ -1,7 +1,9 @@
 from base64 import b64decode
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+import ssl
 import tempfile
 from threading import Thread
 import unittest
@@ -76,12 +78,20 @@ class ProfileTests(unittest.TestCase):
         response.__enter__.return_value = response
         response.read.return_value = b"[]"
         pubkey = public(KEY)
-        with patch("buzz_server.profile.HTTPSConnection") as connect:
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.dict(os.environ, {"SSL_CERT_FILE": directory + "/missing.crt", "SSL_CERT_DIR": directory,
+                                      "SSLKEYLOGFILE": directory + "/tls-keys.log"}),
+              patch("buzz_server.profile.HTTPSConnection") as connect):
             connection = connect.return_value
             connection.getresponse.return_value = response
             relay = urlsplit("wss://Relay.Example.test:8443/nested/")
             for _ in range(2):
                 self.assertEqual(post(relay, "/query", [{"kinds": [0]}], KEY, pubkey), [])
+            context = connect.call_args.kwargs["context"]
+            self.assertIsNone(context.keylog_filename)
+            self.assertTrue(context.check_hostname)
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertFalse((Path(directory) / "tls-keys.log").exists())
 
         nonces = set()
         for request in connection.request.call_args_list:

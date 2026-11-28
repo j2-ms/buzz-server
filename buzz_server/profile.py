@@ -4,7 +4,9 @@ from contextlib import closing
 from hashlib import sha256
 from http.client import HTTPConnection, HTTPSConnection
 import json
+from pathlib import Path
 from secrets import token_hex
+import ssl
 import time
 from urllib.parse import quote, urlsplit
 
@@ -22,9 +24,19 @@ def signed_event(key, pubkey, kind, content, tags, created_at):
             "tags": tags, "content": content, "sig": schnorr_sign(key, digest).hex()}
 
 
+def relay_tls_context():
+    # Use OpenSSL's system roots without consulting SSL_CERT_* or SSLKEYLOGFILE.
+    roots = ssl.get_default_verify_paths()
+    cafile = roots.openssl_cafile if Path(roots.openssl_cafile).is_file() else None
+    capath = roots.openssl_capath if Path(roots.openssl_capath).is_dir() else None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cafile=cafile, capath=capath)
+    return context
+
+
 def post(relay, endpoint, value, key, pubkey):
     secure = relay.scheme == "wss"
-    scheme, connect = ("https", HTTPSConnection) if secure else ("http", HTTPConnection)
+    scheme = "https" if secure else "http"
     host = relay.hostname.encode("idna").decode("ascii")
     authority = f"[{host}]" if ":" in host else host
     if relay.port is not None and relay.port != (443 if secure else 80):
@@ -36,8 +48,10 @@ def post(relay, endpoint, value, key, pubkey):
     proof = signed_event(key, pubkey, 27235, "", tags, int(time.time()))
     headers = {"Authorization": "Nostr " + b64encode(json_bytes(proof)).decode("ascii"),
                "Content-Type": "application/json"}
-    # Direct requests use the system TLS trust store and never follow redirects.
-    with closing(connect(host, relay.port, timeout=10)) as connection:
+    connection = (HTTPSConnection(host, relay.port, timeout=10, context=relay_tls_context())
+                  if secure else HTTPConnection(host, relay.port, timeout=10))
+    # Direct requests never follow redirects or consult proxy settings.
+    with closing(connection):
         connection.request("POST", path, body, headers)
         with connection.getresponse() as response:
             if not 200 <= response.status < 300:
