@@ -317,6 +317,55 @@ class DedicatedCliTests(unittest.TestCase):
         self.assertEqual(reset["configuration"]["sender_policy"]["mode"], "owner-only")
         self.assertNotIn("sender_policy", self.requests[-1][1]["config"])
 
+    def test_custom_sender_policy_blocks_rollback_to_an_older_worker(self):
+        self.create()
+        manifest = manifest_path(self.bindings, "assistant")
+        original = read_json(manifest)
+        del original["initial_sender_policy_supported"]
+        write_json(manifest, original)
+        packages, staging = self.upgrade_fixture()
+        with packages, staging:
+            upgraded = self.call("worker", "upgrade", "assistant")
+
+        config = read_json(self.config)
+        write_json(self.config, {**config, "sender_policy": {"mode": "allowlist", "allowlist": ["ef" * 32]}})
+        self.call("configure", "assistant", "--config", str(self.config))
+        self.call("start", "assistant")
+        effects = list(self.model.effects)
+        error = self.call("worker", "rollback", "assistant", success=False)
+        self.assertEqual(error["code"], "sender_policy_active")
+        self.assertEqual(self.model.effects, effects)
+        status = self.call("status", "assistant")
+        self.assertEqual(status["deployment"]["running_worker"], upgraded["deployment"]["selected_worker"])
+        self.assertEqual(status["configuration"]["sender_policy"]["mode"], "allowlist")
+
+        write_json(self.config, {**config, "sender_policy": {"mode": "owner-only", "allowlist": []}})
+        self.call("configure", "assistant", "--config", str(self.config))
+        self.assertIsNone(self.call("worker", "rollback", "assistant")["deployment"]["selected_worker"])
+
+    def test_interrupted_sender_policy_change_blocks_start_until_retry(self):
+        self.create()
+        self.call("start", "assistant")
+        config = read_json(self.config)
+        write_json(self.config, {**config, "sender_policy": {"mode": "allowlist", "allowlist": ["ef" * 32]}})
+        with patch("buzz_server.account_lifecycle.Lifecycle.apply",
+                   side_effect=Error("target_report", "Synthetic interrupted apply")):
+            error = self.call("configure", "assistant", "--config", str(self.config), success=False)
+        self.assertEqual(error["code"], "target_report")
+        status = self.call("status", "assistant")
+        self.assertEqual(status["service_state"], "inactive")
+        self.assertIsNone(status["configuration"]["sender_policy"])
+        self.run.reset_mock()
+        for command in (("start", "assistant"), ("worker", "upgrade", "assistant"), ("prompt", "clear", "assistant")):
+            with self.subTest(command=command):
+                self.assertEqual(self.call(*command, success=False)["code"], "configuration_incomplete")
+        self.run.assert_not_called()
+
+        self.call("configure", "assistant", "--config", str(self.config))
+        started = self.call("start", "assistant")
+        self.assertTrue(started["runtime_started"])
+        self.assertEqual(started["configuration"]["sender_policy"]["mode"], "allowlist")
+
     def test_diagnostics_are_advisory_bounded_and_mark_old_replies(self):
         self.create()
         before = self.call("status", "assistant")
@@ -706,6 +755,25 @@ class DedicatedCliTests(unittest.TestCase):
         self.assertEqual(created["identity"], "cd" * 32)
         self.assertEqual(set(self.model.files), {self.model.unit_path})
         self.acquire.assert_not_called()
+
+    def test_interrupted_restore_refuses_different_expected_identity(self):
+        create = ("create", "assistant", "--account", "fixture", "--config", str(self.config), "--expect-identity")
+        identity = "cd" * 32
+        with patch("buzz_server.account_lifecycle.Lifecycle.apply",
+                   side_effect=Error("target_report", "Synthetic interrupted apply")):
+            self.assertEqual(self.call(*create, identity, success=False)["code"], "target_report")
+        manifest = manifest_path(self.bindings, "assistant")
+        interrupted = read_json(manifest)
+        self.assertEqual(interrupted["phase"], "creating")
+        self.assertEqual(interrupted["identity"], identity)
+        self.run.reset_mock()
+        self.assertEqual(self.call(*create, "ef" * 32, success=False)["code"], "identity_mismatch")
+        self.assertEqual(read_json(manifest), interrupted)
+        self.run.assert_not_called()
+
+        restored = self.call(*create, identity)
+        self.assertEqual(restored["identity"], identity)
+        self.assertEqual(restored["service_state"], "inactive")
 
 
 if __name__ == "__main__":
