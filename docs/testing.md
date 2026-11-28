@@ -197,6 +197,58 @@ key so the old key receives HTTP 401. Enter the new value using the Goose
 wizard on the stopped agent and verify a new signed reply. Save test verdicts
 and artifact identifiers while keeping the private fixture files off the PR.
 
+### v0.5.0 dedicated Goose trial
+
+On 2026-11-28, two disposable QEMU guests ran Ubuntu 24.04.5 amd64,
+kernel `6.8.0-151-generic`, Python 3.12.3 and systemd `255.4-1ubuntu8.19`.
+The Ubuntu cloud image SHA-256 was
+`d80fe50055e780901549d0dfab203551d79e31cb0fa9ac2b4d45efa1e8a51052`.
+The relay used the membership-gated Buzz 0.3.0 image at
+`sha256:e326a0d99bd0bb1e875673483b12acf1e6c578d4e61b488531c238140d9b13b3`,
+source revision `75d38b6c2d5f357348288ded8c15aba15f765ea5`. The relay and
+OpenAI-compatible model were isolated and reachable on guest loopback.
+
+| Artifact | SHA-256 or upstream verification |
+| --- | --- |
+| v0.5.0 CLI built from `45ba2f0ba27ef3e28d76cdde1f8b9267bae17b2d` | `08c6ae279552a1b5916e2e95a8a7b86bcc36a3c071b19d836a35984461270dab` |
+| v0.5.0 worker | `2f66ab05cc687aee8b5594c426cf58c27395e77412121c620eeb1c08dad17c95` |
+| Locally built v0.5.1 CLI for the upgrade trial | `64d193fa957430a5625f9b30628eda10a47af101b05774b57cf0da8d40e009d4` |
+| Locally built v0.5.1 worker for the upgrade trial | `cb4ffb62651e73b5c13c4f65fc41694f5a7f72474bc9befd057b23e6269219` |
+| Buzz and Buzz ACP 0.5.30, upstream commit `dece76e7e28875b0fd24875fcb802150ef1abec0` | The amd64 archive matched its published digest. Both extracted binaries matched the repository pins. A build attestation for the `.deb` was unavailable to this trial. |
+| Goose 1.60.2, upstream commit `fb55b5a6d7f5b5df96c8f817f1cde6a81880d9f1` | `goose --version` reported 1.60.2. The archive and binary matched the repository pins. The GitHub CLI verified the upstream build attestation. |
+
+- **First reply and sender policy.** Readback verified the BIP-340 signatures,
+  expected authors, channel and parent event. `owner-only` admitted the
+  principal and a verified same-owner peer. `allowlist` admitted the selected
+  unrelated peer after reconfiguration and restart. The unlisted peer stayed
+  denied. `anyone` admitted that peer in the channel and denied its DM.
+- **Diagnostics and renewal.** A synthetic credential revocation caused HTTP
+  401 while systemd reported the worker active. Status showed a harness
+  failure. Cancelling native setup left the unit stopped. Completing the
+  native wizard with replacement authorization and explicitly starting the
+  agent produced a signed reply from the same identity. A separate operator
+  confirmation recorded the observed reply in status.
+- **Worker switch and reboot.** Activating the v0.5.1 CLI left the v0.5.0
+  worker selected. Explicit upgrade and rollback produced signed replies with
+  the operator tool cache withheld and upstream downloads unreachable. A
+  second, stopped agent stayed inactive through its worker upgrade. The
+  kernel boot ID changed from `a9211a03…` to `b5b91676…`. After the tunnel
+  reconnected, the enabled agent recovered through systemd and replied from
+  the same key. The model fixture was restarted before readback. The other
+  unit stayed inactive and disabled.
+- **Clean-host restore.** The old unit was removed, its cgroup was empty and
+  the source VM was powered off before the destination agent was enabled.
+  An archive missing the declared working file failed before agent or unit
+  creation. The destination account had a different UID. The restored key
+  and working file matched their private manifest, and the Goose secret file
+  was absent before native reauthorization. From the prepared backup through
+  signed readback under the original key, recovery took 41 seconds. A
+  follow-up checked the configured prompt bytes and reapplied the source
+  sender policy. The previously qualified peer then received a signed reply.
+
+These results apply to the tested Ubuntu 24.04 Goose combination. Ubuntu
+26.04 lifecycle evidence from the earlier v0.3 trial is linked above.
+
 ## Installed CLI and update consent (offline)
 
 `tests/test_update_pty.py` installs two synthetic zipapps with a local release
