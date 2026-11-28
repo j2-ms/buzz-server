@@ -11,6 +11,9 @@ outside mutation locks, remap/collision rejection at commit, reuse of owned priv
 tools, secret-free argv, typed target acknowledgments, retry after interrupted
 publication, and uninstall refusal under both exclusive locks. A dedicated doctor
 check needs no operator user manager. Same-account tests remain separate.
+The suite checks rollback refusal when the previous worker cannot enforce the
+selected sender policy, start refusal after interrupted policy configuration,
+and rejection of a different expected public key on restore retry.
 
 `test_accounts.py` checks binding corruption/remapping and fixed UID/argv/env.
 It also rejects operator unit-source paths replaceable through untrusted ancestors.
@@ -111,6 +114,143 @@ a worker runs, and checks stop/uninstall and identity-preserving reinstall.
 The source-installer acceptance mode remains available without `--releases`.
 Independent review, both disposable modes, public anonymous asset downloads,
 a fresh OS install and live provider/relay verification remain separate gates.
+
+## Qualify a dedicated worker release
+
+The managed amd64 combinations are Ubuntu 24.04 LTS or 26.04 LTS with the
+Goose harness. The current runtime pins are Buzz desktop release 0.5.30
+(`buzz` and `buzz-acp`) and Goose 1.60.2. Choose and name the OS combination
+in every result. Track alternate harnesses through [issue #15](https://github.com/j2-ms/buzz-server/issues/15)
+and qualify each before claiming support or a renewal path for it.
+
+1. On a disposable VM, record the OS release, architecture, Python and systemd
+   versions, git commit, CLI version and the built release's SHA-256. Give the
+   pre-existing fixture accounts private homes and use explicit operator sudo.
+2. Fetch the platform assets named in [the pin table in code](../buzz_server/dependencies.py).
+   Compare `sha256sum` and bytes to the pinned archive metadata and compare
+   the extracted binaries with `member_sha256`. Confirm the Buzz package
+   version with `dpkg-deb -f ARCHIVE Version` and check `buzz --help` and
+   `buzz-acp --help` from those exact extracted binaries. Verify `goose
+   --version` and its `acp` and `configure` help. The pinned Buzz binaries
+   do not implement a standalone `--version` flag. Record the upstream release
+   tag and resolved commit for each asset. Verify a published GitHub build
+   attestation with `gh attestation verify FILE --repo OWNER/REPO` where one
+   exists. Report archive-integrity results and upstream provenance separately.
+3. Use a network-isolated relay and a deterministic loopback model fixture.
+   Record their versions or digests and fixture configuration. Create the
+   dedicated agent, configure Goose, admit the identity when required and
+   follow [First reply](quickstart.md#first-reply). Confirm the source and reply
+   signatures, event authors, channel and reply linkage from readback. Check
+   that known-silent or failed cases and a confirmed reply are distinguishable
+   in status. Do not use replies from a failed-auth notice as successful model
+   replies.
+4. Start one agent and explicitly start and stop a second agent. Record the
+   VM boot ID from `/proc/sys/kernel/random/boot_id` and both unit enablement
+   states. Reboot the VM, confirm the boot ID changed, then check that the
+   enabled agent became ready with its original key and can reply again. Verify
+   the intentionally stopped unit stayed inactive and disabled. Record whether
+   the relay/model fixture needed to be restarted after boot.
+5. From an older installed CLI and deployed worker, use the ordinary CLI update
+   or install a candidate into that prefix with the same state binding. Record
+   the active worker before and after CLI activation. Run `buzz-server worker
+   upgrade ID`, confirm the selected archive and running version, and check a
+   new reply under the same key. Run `buzz-server worker rollback ID` with
+   dependency downloads disabled and confirm the prior worker and a new reply.
+   Check that a stopped agent stays disabled through the worker switch.
+6. Exercise [provider renewal](quickstart.md#renew-provider-access) with invalid
+   synthetic authorization and replacement access to the fixture. Check
+   cancellation/failure separately. Exercise the [clean-host restore](recovery.md)
+   on a second prepared VM. Time the restore, include the incomplete-backup
+   control, and confirm the old system unit cannot send as the restored key.
+
+For sender policy qualification, use a disposable channel with signed events
+from the principal, a peer with a verified same-owner attestation on its
+profile, an unrelated sender to be allowlisted, and an unlisted sender. Check
+principal and sibling replies in `owner-only`, denied unrelated and unlisted
+senders, and admission of only the chosen additional sender in `allowlist`.
+Repeat after restart, then opt into `anyone` and check a reply in the joined
+channel and continued denial of a DM from an unrelated sender. Check that each
+denied sender can publish the message and that the agent is active, so a routing
+or simple transport failure does not count as an author-gate result.
+
+Report an observed reply and any limitations for the named combination. A
+loopback fixture qualifies the integration under those conditions. Hosted
+provider access and production relay acceptance require their own trials.
+
+### Run the loopback model fixture
+
+In the isolated environment, prepare a private directory and put one synthetic
+API key in its `provider-token` file. From an unprivileged fixture login run
+`timeout 15m python3 -B tests/fixture_openai.py --disposable --directory DIR`.
+Configure the stopped Goose agent for the OpenAI-compatible base URL
+`http://127.0.0.1:8765/v1`, model `fixture-model`, and the synthetic key. Use
+Goose's developer shell tool with automatic approval in this disposable
+account. The fixture returns a shell call containing only a fixed `buzz
+messages send` invocation for the channel and parent event supplied by the
+test operator. Keep every endpoint on isolated loopback, including the relay.
+
+Send a mention using the procedure in [First reply](quickstart.md#first-reply).
+As soon as the send returns, write the channel UUID and returned event ID into
+`DIR/arm` on a single line separated by one space. After readback, remove
+`DIR/arm` so it cannot affect another turn. The `GET /fixture` counters report
+model requests, rejected authorization and issued shell calls. Compare those
+counters before and after each denied sender to verify that the event did not
+reach the harness. For renewal, change `provider-token` to a second synthetic
+key so the old key receives HTTP 401. Enter the new value using the Goose
+wizard on the stopped agent and verify a new signed reply. Save test verdicts
+and artifact identifiers while keeping the private fixture files off the PR.
+
+### v0.5.0 dedicated Goose trial
+
+On 2026-11-28, two disposable QEMU guests ran Ubuntu 24.04.5 amd64,
+kernel `6.8.0-151-generic`, Python 3.12.3 and systemd `255.4-1ubuntu8.19`.
+The Ubuntu cloud image SHA-256 was
+`d80fe50055e780901549d0dfab203551d79e31cb0fa9ac2b4d45efa1e8a51052`.
+The relay used the membership-gated Buzz 0.3.0 image at
+`sha256:e326a0d99bd0bb1e875673483b12acf1e6c578d4e61b488531c238140d9b13b3`,
+source revision `75d38b6c2d5f357348288ded8c15aba15f765ea5`. The relay and
+OpenAI-compatible model were isolated and reachable on guest loopback.
+
+| Artifact | SHA-256 or upstream verification |
+| --- | --- |
+| v0.5.0 CLI built from `45ba2f0ba27ef3e28d76cdde1f8b9267bae17b2d` | `08c6ae279552a1b5916e2e95a8a7b86bcc36a3c071b19d836a35984461270dab` |
+| v0.5.0 worker | `2f66ab05cc687aee8b5594c426cf58c27395e77412121c620eeb1c08dad17c95` |
+| Locally built v0.5.1 CLI for the upgrade trial | `64d193fa957430a5625f9b30628eda10a47af101b05774b57cf0da8d40e009d4` |
+| Locally built v0.5.1 worker for the upgrade trial | `cb4ffb62651e73b5c13c4f65fc41694f5a7a7f72474bc9befd057b23e6269219` |
+| Buzz and Buzz ACP 0.5.30, upstream commit `dece76e7e28875b0fd24875fcb802150ef1abec0` | The amd64 archive matched its published digest. Both extracted binaries matched the repository pins. A build attestation for the `.deb` was unavailable to this trial. |
+| Goose 1.60.2, upstream commit `fb55b5a6d7f5b5df96c8f817f1cde6a81880d9f1` | `goose --version` reported 1.60.2. The archive and binary matched the repository pins. The GitHub CLI verified the upstream build attestation. |
+
+- **First reply and sender policy.** Readback verified the BIP-340 signatures,
+  expected authors, channel and parent event. `owner-only` admitted the
+  principal and a verified same-owner peer. `allowlist` admitted the selected
+  unrelated peer after reconfiguration and restart. The unlisted peer stayed
+  denied. `anyone` admitted that peer in the channel and denied its DM.
+- **Diagnostics and renewal.** A synthetic credential revocation caused HTTP
+  401 while systemd reported the worker active. Status showed a harness
+  failure. Cancelling native setup left the unit stopped. Completing the
+  native wizard with replacement authorization and explicitly starting the
+  agent produced a signed reply from the same identity. A separate operator
+  confirmation recorded the observed reply in status.
+- **Worker switch and reboot.** Activating the v0.5.1 CLI left the v0.5.0
+  worker selected. Explicit upgrade and rollback produced signed replies with
+  the operator tool cache withheld and upstream downloads unreachable. A
+  second, stopped agent stayed inactive through its worker upgrade. The
+  kernel boot ID changed from `a9211a03…` to `b5b91676…`. After the tunnel
+  reconnected, the enabled agent recovered through systemd and replied from
+  the same key. The model fixture was restarted before readback. The other
+  unit stayed inactive and disabled.
+- **Clean-host restore.** The old unit was removed, its cgroup was empty and
+  the source VM was powered off before the destination agent was enabled.
+  An archive missing the declared working file failed before agent or unit
+  creation. The destination account had a different UID. The restored key
+  and working file matched their private manifest, and the Goose secret file
+  was absent before native reauthorization. From the prepared backup through
+  signed readback under the original key, recovery took 41 seconds. A
+  follow-up checked the configured prompt bytes and reapplied the source
+  sender policy. The previously qualified peer then received a signed reply.
+
+These results apply to the tested Ubuntu 24.04 Goose combination. Ubuntu
+26.04 lifecycle evidence from the earlier v0.3 trial is linked above.
 
 ## Installed CLI and update consent (offline)
 

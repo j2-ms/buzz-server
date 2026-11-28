@@ -40,6 +40,13 @@ class ParserTests(unittest.TestCase):
                            'JSON and redirected runs skip offers', 'update --auto on'):
                 self.assertIn(detail, help_text)
 
+    def test_sender_policy_requires_unambiguous_selection(self):
+        self.assertTrue(config.valid_sender_policy({"mode": "allowlist", "allowlist": ["01" * 32]}))
+        self.assertTrue(config.valid_sender_policy({"mode": "anyone", "allowlist": []}))
+        for mode, keys in (("nobody", []), ("allowlist", []), ("allowlist", ["a1" * 31]),
+                           ("allowlist", ["b1" * 32] * 2), ("anyone", ["c1" * 32])):
+            self.assertFalse(config.valid_sender_policy({"mode": mode, "allowlist": keys}))
+
 
 class FakeSystemd:
     """Unit-test double only. Never used by disposable acceptance."""
@@ -118,6 +125,18 @@ class CliTests(unittest.TestCase):
 
     def create(self):
         return self.call("create", "agent", "--config", str(self.config_path))
+
+    def test_same_account_status_shows_prompt_source_and_start_offers_reply_check(self):
+        self.create()
+        data = self.call("status", "agent")
+        self.assertEqual(data["configuration"]["prompt_source"], "agent_configuration")
+        self.assertFalse(data["buzz_response_verified"])
+        status = cli.render("status", data)
+        self.assertIn("Buzz Server prompt source: agent configuration", status)
+        self.assertNotIn(str(self.config_path), status)
+        self.assertNotIn("Buzz reply untested", status)
+        self.assertNotIn(cli.FIRST_REPLY_URL, status)
+        self.assertIn(cli.FIRST_REPLY_URL, cli.render("start", self.call("start", "agent")))
 
     def test_doctor_plain_progress_and_verdict(self):
         argv = ['--state-dir', str(self.root), '--unit-dir', str(self.units), 'doctor',
@@ -534,7 +553,7 @@ class RuntimeTests(unittest.TestCase):
                "config": {"provider": {"kind": "goose-managed"}, "relay_url": "fixture", "profile": {}}}
         env = {key: "fixture" for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
         for stopping, expected in ((False, 76), (True, 0)):
-            runtime = Mock(pid=123)
+            runtime = Mock(pid=123, stderr=io.BytesIO())
             runtime.poll.return_value = None
             signals = {}
             ready_at_exit = []
@@ -555,7 +574,10 @@ class RuntimeTests(unittest.TestCase):
                   patch("buzz_server.runtime.subprocess.Popen", return_value=runtime),
                   patch("buzz_server.runtime.time.sleep")):
                 self.assertEqual(worker(store, "agent", dedicated=True), expected)
-            notify.assert_called_with("ready", ready=True)
+            ready = [call.args[0] for call in notify.call_args_list if call.kwargs.get("ready")]
+            self.assertEqual(len(ready), 1)
+            self.assertIn("|ready:", ready[0])
+            self.assertIn("|stopped:" if stopping else "|exited:", notify.call_args.args[0])
             self.assertEqual(ready_at_exit, [True])
             self.assertEqual(runtime.terminate.call_count, int(stopping))
             self.assertFalse((directory / "ready.json").exists())

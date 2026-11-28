@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import stat
 import struct
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -252,6 +253,7 @@ class DedicatedCliTests(unittest.TestCase):
 
     def test_prompt_revisions_are_snapshots_and_survive_configure_and_rollback(self):
         created = self.create()
+        self.assertIn("prompt source: agent configuration", self.call("status", "assistant", structured=False))
         self.assertEqual(self.call("prompt", "activate", "assistant", "--file", str(self.prompt), success=False)["code"],
                          "worker_upgrade_required")
         packages, staging = self.upgrade_fixture()
@@ -263,6 +265,10 @@ class DedicatedCliTests(unittest.TestCase):
         self.assertIsNone(selected["deployment"]["running_worker"])
         initial = b"SYNTHETIC-PRIVATE-PROMPT"
         first = self.call("prompt", "activate", "assistant", "--file", str(self.prompt))
+        self.assertEqual(first["configuration"]["prompt_source"], "approved_snapshot")
+        summary = self.call("show", "assistant", structured=False)
+        self.assertIn("approved snapshot revision " + first["deployment"]["prompt_revision"], summary)
+        self.assertNotIn(str(self.prompt), summary)
         unit = self.model.files[self.model.unit_path]
         credential = Path(next(line.split(":", 1)[1] for line in unit.decode().splitlines() if line.startswith("LoadCredential=")))
         self.assertEqual(self.deployment_files[credential], initial)
@@ -281,13 +287,107 @@ class DedicatedCliTests(unittest.TestCase):
         self.assertEqual(configured["deployment"]["prompt_revision"], second["deployment"]["prompt_revision"])
         rolled_back = self.call("prompt", "rollback", "assistant")
         self.assertEqual(rolled_back["deployment"]["prompt_revision"], first["deployment"]["prompt_revision"])
+        self.assertIn(first["deployment"]["prompt_revision"], self.call("status", "assistant", structured=False))
         self.assertEqual(self.model.files[self.model.unit_path], unit)
         self.assertEqual(self.deployment_files[credential], initial)
         self.assertEqual(self.call("worker", "rollback", "assistant", success=False)["code"], "prompt_active")
-        self.call("prompt", "clear", "assistant")
+        cleared = self.call("prompt", "clear", "assistant")
+        self.assertEqual(cleared["configuration"]["prompt_source"], "agent_configuration")
+        self.assertIn("prompt source: agent configuration", self.call("status", "assistant", structured=False))
         self.call("worker", "rollback", "assistant")
         self.call("delete", "assistant")
         self.assertEqual(self.call("list")["agents"], [])
+
+    def test_sender_policy_reconfigure_preserves_identity_and_requires_explicit_change(self):
+        created = self.create()
+        self.assertEqual(created["configuration"]["sender_policy"]["mode"], "owner-only")
+        original = read_json(self.config)
+        peer = "ef" * 32
+        write_json(self.config, {**original, "sender_policy": {"mode": "allowlist", "allowlist": [peer]}})
+        configured = self.call("configure", "assistant", "--config", str(self.config))
+        self.assertEqual(configured["configuration"]["sender_policy"], {"mode": "allowlist", "allowlist_count": 1})
+        self.assertEqual(configured["identity"], created["identity"])
+        self.assertEqual(configured["desired"], "stopped")
+        self.assertNotIn(peer, self.call("status", "assistant", structured=False))
+        write_json(self.config, original)
+        rerun = self.call("configure", "assistant", "--config", str(self.config))
+        self.assertEqual(rerun["configuration"]["sender_policy"]["mode"], "allowlist")
+        write_json(self.config, {**original, "sender_policy": {"mode": "owner-only", "allowlist": []}})
+        reset = self.call("configure", "assistant", "--config", str(self.config))
+        self.assertEqual(reset["configuration"]["sender_policy"]["mode"], "owner-only")
+        self.assertNotIn("sender_policy", self.requests[-1][1]["config"])
+
+    def test_custom_sender_policy_blocks_rollback_to_an_older_worker(self):
+        self.create()
+        manifest = manifest_path(self.bindings, "assistant")
+        original = read_json(manifest)
+        del original["initial_sender_policy_supported"]
+        write_json(manifest, original)
+        packages, staging = self.upgrade_fixture()
+        with packages, staging:
+            upgraded = self.call("worker", "upgrade", "assistant")
+
+        config = read_json(self.config)
+        write_json(self.config, {**config, "sender_policy": {"mode": "allowlist", "allowlist": ["ef" * 32]}})
+        self.call("configure", "assistant", "--config", str(self.config))
+        self.call("start", "assistant")
+        effects = list(self.model.effects)
+        error = self.call("worker", "rollback", "assistant", success=False)
+        self.assertEqual(error["code"], "sender_policy_active")
+        self.assertEqual(self.model.effects, effects)
+        status = self.call("status", "assistant")
+        self.assertEqual(status["deployment"]["running_worker"], upgraded["deployment"]["selected_worker"])
+        self.assertEqual(status["configuration"]["sender_policy"]["mode"], "allowlist")
+
+        write_json(self.config, {**config, "sender_policy": {"mode": "owner-only", "allowlist": []}})
+        self.call("configure", "assistant", "--config", str(self.config))
+        self.assertIsNone(self.call("worker", "rollback", "assistant")["deployment"]["selected_worker"])
+
+    def test_interrupted_sender_policy_change_blocks_start_until_retry(self):
+        self.create()
+        self.call("start", "assistant")
+        config = read_json(self.config)
+        write_json(self.config, {**config, "sender_policy": {"mode": "allowlist", "allowlist": ["ef" * 32]}})
+        with patch("buzz_server.account_lifecycle.Lifecycle.apply",
+                   side_effect=Error("target_report", "Synthetic interrupted apply")):
+            error = self.call("configure", "assistant", "--config", str(self.config), success=False)
+        self.assertEqual(error["code"], "target_report")
+        status = self.call("status", "assistant")
+        self.assertEqual(status["service_state"], "inactive")
+        self.assertIsNone(status["configuration"]["sender_policy"])
+        self.run.reset_mock()
+        for command in (("start", "assistant"), ("worker", "upgrade", "assistant"), ("prompt", "clear", "assistant")):
+            with self.subTest(command=command):
+                self.assertEqual(self.call(*command, success=False)["code"], "configuration_incomplete")
+        self.run.assert_not_called()
+
+        self.call("configure", "assistant", "--config", str(self.config))
+        started = self.call("start", "assistant")
+        self.assertTrue(started["runtime_started"])
+        self.assertEqual(started["configuration"]["sender_policy"]["mode"], "allowlist")
+
+    def test_diagnostics_are_advisory_bounded_and_mark_old_replies(self):
+        self.create()
+        before = self.call("status", "assistant")
+        self.assertEqual(before["diagnostics"]["worker"]["outcome"], "unknown")
+        self.assertEqual(self.call("diagnostics", "confirm-reply", "assistant", success=False)["code"], "reply_unrecorded")
+        self.call("start", "assistant")
+        self.model.overrides["InvocationID"] = "ab" * 16
+        now = int(time.time())
+        self.startup_status = f"buzz-server:observations-v1|ready:{now}|connected:{now}|failed:{now}".encode()
+        status = self.call("status", "assistant")
+        self.assertTrue(status["runtime_started"])
+        self.assertEqual(status["diagnostics"]["harness"], {"outcome": "failed", "observed_at": now, "stale": False})
+        self.assertIn("Check the harness and provider setup", self.call("status", "assistant", structured=False))
+        confirmed = self.call("diagnostics", "confirm-reply", "assistant")
+        self.assertEqual(confirmed["diagnostics"]["reply"]["outcome"], "operator_confirmed")
+        self.assertFalse(confirmed["diagnostics"]["reply"]["stale"])
+        self.assertFalse(confirmed["buzz_response_verified"])
+        self.model.overrides["InvocationID"] = "cd" * 16
+        self.startup_status = b"SYNTHETIC-PRIVATE-RAW-OUTPUT"
+        stale = self.call("status", "assistant")
+        self.assertTrue(stale["diagnostics"]["reply"]["stale"])
+        self.assertEqual(stale["diagnostics"]["relay"]["outcome"], "unknown")
 
     def test_interrupted_switch_retries_without_fetching_and_requires_stopped_manager(self):
         self.create()
@@ -448,7 +548,7 @@ class DedicatedCliTests(unittest.TestCase):
             self.assertIs(started["runtime_started"], True)
             self.assertEqual(started["startup"]["profile"], "confirmed")
             self.assertIs(started["buzz_response_verified"], False)
-            self.assertIn("Buzz reply untested", self.call("start", "assistant", structured=False))
+            self.assertIn(cli.FIRST_REPLY_URL, self.call("start", "assistant", structured=False))
             self.assertEqual(self.call("status", "assistant")["identity"], created["identity"])
             with self.assertRaises(Error) as failure:
                 release.uninstall(prefix)
@@ -461,7 +561,8 @@ class DedicatedCliTests(unittest.TestCase):
             self.call("stop", "assistant")
             with patch("sys.stdin.isatty", return_value=True), patch("sys.stdout.isatty", return_value=True), patch("sys.stderr.isatty", return_value=True):
                 result = self.call("inference", "configure", "assistant", structured=False)
-                self.assertIn("A clean exit can also mean setup was cancelled", result)
+                self.assertIn("If you cancelled, rerun", result)
+                self.assertIn("Provider access and Buzz replies remain unverified", result)
             self.call("delete", "assistant")
             self.assertEqual(self.private_state, b"SYNTHETIC-PRIVATE-STATE")
             self.assertTrue(self.bindings.path("assistant").exists())
@@ -654,6 +755,25 @@ class DedicatedCliTests(unittest.TestCase):
         self.assertEqual(created["identity"], "cd" * 32)
         self.assertEqual(set(self.model.files), {self.model.unit_path})
         self.acquire.assert_not_called()
+
+    def test_interrupted_restore_refuses_different_expected_identity(self):
+        create = ("create", "assistant", "--account", "fixture", "--config", str(self.config), "--expect-identity")
+        identity = "cd" * 32
+        with patch("buzz_server.account_lifecycle.Lifecycle.apply",
+                   side_effect=Error("target_report", "Synthetic interrupted apply")):
+            self.assertEqual(self.call(*create, identity, success=False)["code"], "target_report")
+        manifest = manifest_path(self.bindings, "assistant")
+        interrupted = read_json(manifest)
+        self.assertEqual(interrupted["phase"], "creating")
+        self.assertEqual(interrupted["identity"], identity)
+        self.run.reset_mock()
+        self.assertEqual(self.call(*create, "ef" * 32, success=False)["code"], "identity_mismatch")
+        self.assertEqual(read_json(manifest), interrupted)
+        self.run.assert_not_called()
+
+        restored = self.call(*create, identity)
+        self.assertEqual(restored["identity"], identity)
+        self.assertEqual(restored["service_state"], "inactive")
 
 
 if __name__ == "__main__":

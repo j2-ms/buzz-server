@@ -5,12 +5,14 @@ import signal
 import socket
 import stat
 import subprocess
+import threading
 import time
 
-from .config import current, require_current, validate_relay_transport
+from .config import current, require_current, sender_policy, validate_relay_transport
 from .errors import Error
 from . import dependencies
 from .identity import public
+from .observations import Observations
 from .profile import publish_profile
 from .storage import atomic, private_dir, read_private, write_json
 
@@ -154,7 +156,11 @@ def prepare(store, doc, snapshot=True, *, tools=None, managed_prompt=False):
     else:
         goose, acp = (executable(tools / name) for name in ("goose", "buzz-acp"))
         executable(tools / "buzz")
-    help_check(acp, ["--system-prompt-file", "--agent-command", "--agent-args", "--model", "--permission-mode", "--respond-to", "--session-title", "--config"])
+    policy = sender_policy(c)
+    flags = ["--system-prompt-file", "--agent-command", "--agent-args", "--model", "--permission-mode", "--respond-to", "--session-title", "--config"]
+    if policy["mode"] == "allowlist":
+        flags.append("--respond-to-allowlist")
+    help_check(acp, flags)
     env, work = goose_context(store, doc, tools=tools)
     if snapshot and not managed_prompt:
         atomic(prompt_path, prompt)
@@ -166,7 +172,9 @@ def prepare(store, doc, snapshot=True, *, tools=None, managed_prompt=False):
     command = [acp, "--relay-url", c["relay_url"], "--agent-owner", c["owner"],
                "--agent-command", goose, "--agent-args", "acp",
                "--system-prompt-file", str(prompt_path), "--session-title", c["profile"]["name"],
-               "--config", str(acp_config), "--respond-to", "owner-only", "--permission-mode", "dont-ask"]
+               "--config", str(acp_config), "--respond-to", policy["mode"], "--permission-mode", "dont-ask"]
+    if policy["mode"] == "allowlist":
+        command.extend(("--respond-to-allowlist", ",".join(policy["allowlist"])))
     return command, env, work
 
 
@@ -218,6 +226,7 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
     child = None
     stopping = False
     publishing = False
+    observations = Observations(notify_startup) if dedicated else None
 
     def terminate_child():
         if child is not None and child.poll() is None:
@@ -242,7 +251,7 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
     refusal = None
     try:
         if dedicated:
-            notify_startup(phase)
+            observations.update(0, phase)
         doc = store.load(ident)
         if doc["desired"] != "running":
             return 0
@@ -260,7 +269,7 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
             return 0
         phase = "profile_unconfirmed"
         if dedicated:
-            notify_startup(phase)
+            observations.update(0, phase)
         previous_alarm = signal.signal(signal.SIGALRM, profile_timeout)
         try:
             publishing = True
@@ -278,14 +287,21 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
         if not profile_accepted(result):
             if dedicated and profile_refused(result):
                 refusal = "profile_refused"
+                observations.update(1, "refused")
             raise Error("profile_failed", "Profile update failed.")
         event(directory, "profile_applied")
         phase = "local_runtime"
         if dedicated:
-            notify_startup(phase)
+            observations.update(1, "admitted")
+            observations.update(0, phase)
+            env["RUST_LOG"] = "buzz_acp=info,pool::prompt=error"
         if stopping:
             return 0
-        child = subprocess.Popen(command, env=env, cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        child = subprocess.Popen(command, env=env, cwd=work, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.PIPE if dedicated else subprocess.DEVNULL)
+        if dedicated:
+            watcher = threading.Thread(target=observations.watch, args=(child.stderr,), daemon=True)
+            watcher.start()
         if stopping:
             terminate_child()
             child.wait(timeout=5)
@@ -299,13 +315,16 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
         write_json(directory / "ready.json", {"worker_pid": os.getpid(), "child_pid": child.pid, "revision": doc["revision"]})
         event(directory, "runtime_started")
         if dedicated:
-            notify_startup("ready", ready=True)
+            observations.update(0, "ready", ready=True)
         code = child.wait()
+        if dedicated:
+            watcher.join(0.2)
+            observations.update(0, "stopped" if stopping else "exited")
         event(directory, "worker_stopped" if stopping else "runtime_exited")
         return 0 if stopping else (STARTUP_EXIT[phase] if dedicated else code or 1)
     except Exception:
         if dedicated and not stopping:
-            notify_startup(phase)
+            observations.update(0, "failed")
         event(directory, "worker_failed")
         if child is not None and child.poll() is None:
             terminate_child()

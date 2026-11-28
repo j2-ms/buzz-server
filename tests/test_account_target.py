@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from buzz_server import worker_payload
+from buzz_server.identity import public
 from buzz_server.storage import atomic
 
 
@@ -43,12 +44,27 @@ class TargetFileTests(unittest.TestCase):
         self.assertEqual(result.stderr, b"")
         return json.loads(result.stdout) if success else None
 
-    def apply(self, revision=1, identity=None):
+    def apply(self, revision=1, identity=None, *, success=True):
         return self.invoke("apply", {"identity": identity, "revision": revision, "prompt": "Synthetic private prompt",
             "config": {"relay_url": "wss://relay.example.test", "owner": "ab" * 32,
                        "profile": {"name": "Fixture", "about": "", "avatar": ""},
                        "prompt_file": "/unused/operator/prompt", "harness": {"kind": "goose", "command": "/unused/operator/goose"},
-                       "provider": {"kind": "goose-managed"}}})
+                       "provider": {"kind": "goose-managed"}}}, success=success)
+
+    def test_restore_public_key_guard_refuses_missing_and_wrong_identity(self):
+        self.invoke("install", raw=self.bundle)
+        agent = self.data / "state/agents/assistant"
+        identity = public("0" * 63 + "1")
+        self.apply(identity=identity, success=False)
+        self.assertFalse((agent / "identity.key").exists())
+        self.assertFalse((agent / "definition.json").exists())
+        wrong_key = ("0" * 63 + "2").encode()
+        atomic(agent / "identity.key", wrong_key)
+        self.apply(identity=identity, success=False)
+        self.assertEqual((agent / "identity.key").read_bytes(), wrong_key)
+        self.assertFalse((agent / "definition.json").exists())
+        atomic(agent / "identity.key", ("0" * 63 + "1").encode())
+        self.assertEqual(self.apply(identity=identity)["identity"], identity)
 
     def test_real_target_install_configure_delete_retains_identity_and_state(self):
         self.invoke("install", raw=self.bundle)

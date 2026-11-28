@@ -8,6 +8,39 @@ from urllib.parse import urlsplit
 from .errors import Error
 
 
+SENDER_MODES = ("owner-only", "allowlist", "anyone")
+CONFIG_FIELDS = {"relay_url", "owner", "profile", "prompt_file", "provider", "harness"}
+
+
+def valid_sender_policy(policy):
+    if not isinstance(policy, dict) or set(policy) != {"mode", "allowlist"}:
+        return False
+    mode, keys = policy["mode"], policy["allowlist"]
+    return (mode in SENDER_MODES and isinstance(keys, list) and len(keys) <= 128
+            and bool(keys) == (mode == "allowlist")
+            and all(isinstance(key, str) and re.fullmatch("[0-9a-f]{64}", key) for key in keys)
+            and len(set(keys)) == len(keys))
+
+
+def sender_policy(c):
+    return c.get("sender_policy", {"mode": "owner-only", "allowlist": []})
+
+
+def sender_summary(c):
+    policy = sender_policy(c)
+    return {"mode": policy["mode"], "allowlist_count": len(policy["allowlist"])}
+
+
+def preserve_sender_policy(candidate, previous):
+    # An older automation client can still replace the rest of the definition.
+    if "sender_policy" not in candidate and "sender_policy" in previous:
+        candidate["sender_policy"] = previous["sender_policy"]
+    if sender_policy(candidate)["mode"] == "owner-only":
+        # The default representation can be read by older workers on rollback.
+        candidate.pop("sender_policy", None)
+    return candidate
+
+
 def invalid() -> NoReturn:
     raise Error("invalid_config", "Invalid configuration. Use the documented v1 schema, absolute file references and credential-free URLs; credentials belong in Goose private state.")
 
@@ -46,8 +79,10 @@ def validate_relay_transport(value):
 
 
 def validate(c):
-    if not isinstance(c, dict) or set(c) != {"relay_url", "owner", "profile", "prompt_file", "provider", "harness"}:
+    if not isinstance(c, dict) or set(c) - {"sender_policy"} != CONFIG_FIELDS:
         invalid()
+    if not valid_sender_policy(sender_policy(c)):
+        raise Error("invalid_config", "Invalid sender policy. Use owner-only, allowlist with distinct 64-character lowercase hex public keys, or anyone with an empty allowlist.")
     if not url(c["relay_url"], ("ws", "wss")) or not isinstance(c["owner"], str) or not re.fullmatch("[0-9a-f]{64}", c["owner"]):
         invalid()
     p = c["profile"]

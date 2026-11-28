@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 
-from . import config, dependencies, worker_payload
+from . import config, dependencies, observations, worker_payload
 from .accounts import Bindings
 from .account_commands import Commands
 from .account_deployment import Deployment, SUFFIX as DEPLOYMENT_SUFFIX
@@ -44,8 +44,7 @@ def render_startup(data):
     }
     runtime = ("Local runtime process observed." if data["runtime_started"]
                else "Local runtime readiness unobserved.")
-    lines = [profile[report["profile"]], runtime,
-             "Buzz reply untested. See First reply in docs/quickstart.md."]
+    lines = [profile[report["profile"]], runtime]
     if report["failure_stage"]:
         stage = report["failure_stage"]
         lines.append(f"Startup stage [{stage}]. {STARTUP_ACTIONS[stage]}")
@@ -60,13 +59,50 @@ def render_startup(data):
     return lines
 
 
+def render_diagnostics(status):
+    lines = []
+    for stage, entry in status.items():
+        outcome = entry["outcome"].replace("_", " ")
+        when = entry["observed_at"]
+        if when is None:
+            lines.append(f"{stage.capitalize()}: {outcome}.")
+        else:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(when))
+            age = ", historical" if entry["stale"] else ""
+            lines.append(f"{stage.capitalize()}: {outcome} ({stamp}{age}).")
+    relay = status["relay"]
+    if relay["outcome"] in {"disconnected", "connection_failed", "refused"} and not relay["stale"]:
+        lines.append("Check relay connectivity and admission for this agent.")
+    harness = status["harness"]
+    if harness["outcome"] != "unknown" and not harness["stale"]:
+        lines.append("Check the harness and provider setup. For expired access, stop the agent before renewing authorization.")
+    return lines
+
+
+def invocation(state):
+    value = state.get("InvocationID", "")
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value) and value != "0" * 32 else None
+
+
+def valid_reply_observation(value):
+    return (isinstance(value, dict) and set(value) == {"observed_at", "invocation", "revision"}
+            and type(value["observed_at"]) is int and 0 < value["observed_at"] <= 9999999999
+            and invocation({"InvocationID": value["invocation"]}) is not None
+            and type(value["revision"]) is int and value["revision"] > 0)
+
+
 def manifest_path(bindings, ident):
     return bindings.root / (ident + ".agent.json")
 
 
 def load(bindings, ident):
     value = read_json(manifest_path(bindings, ident))
-    if (not isinstance(value, dict) or set(value) != {"version", "id", "phase", "identity", "revision", "desired"}
+    optional = {"sender_policy", "initial_sender_policy_supported", "sender_policy_pending", "reply_observation"}
+    if (not isinstance(value, dict) or set(value) - optional != {"version", "id", "phase", "identity", "revision", "desired"}
+            or not config.valid_sender_policy(config.sender_policy(value))
+            or value.get("initial_sender_policy_supported", True) is not True
+            or value.get("sender_policy_pending", True) is not True
+            or "reply_observation" in value and not valid_reply_observation(value["reply_observation"])
             or type(value["version"]) is not int or value["version"] != 1 or value["id"] != ident
             or value["phase"] not in {"creating", "ready", "deleting", "unit_removed", "deleted"}
             or value["desired"] not in {"running", "stopped"}
@@ -211,13 +247,7 @@ class Lifecycle:
                 self.target("install", stdin=stream)
         return acquired_names
 
-    def apply(self, doc, path, *, prepared=None):
-        candidate, prompt = prepared if prepared is not None else (
-            config.load(path), None)
-        if prompt is None:
-            prompt = read_private(candidate["prompt_file"], 65536).decode("utf-8")
-        if not config.text(prompt, 65536, True):
-            config.invalid()
+    def apply(self, doc, candidate, prompt):
         result = self.target("apply", {"config": candidate, "prompt": prompt,
                                        "revision": doc["revision"], "identity": doc["identity"]})
         if (set(result) != {"identity", "revision"} or not isinstance(result["identity"], str)
@@ -226,22 +256,41 @@ class Lifecycle:
                 or doc["identity"] is not None and doc["identity"] != result["identity"]):
             raise Error("target_report", "The target configuration report was invalid; no identity replacement was accepted.")
         doc["identity"] = result["identity"]
+        doc.pop("sender_policy_pending", None)
+        doc.pop("sender_policy", None)
+        if "sender_policy" in candidate:
+            doc["sender_policy"] = candidate["sender_policy"]
         self.save(doc)
+
+    def configuration(self, doc, path, prepared=None):
+        if prepared is None:
+            candidate = config.load(path)
+            prompt = read_private(candidate["prompt_file"], 65536).decode("utf-8")
+        else:
+            candidate, prompt = prepared
+        if not config.text(prompt, 65536, True):
+            config.invalid()
+        return config.preserve_sender_policy(candidate, doc), prompt
 
     def create(self, doc, path, *, prepared=None, structured=False):
         # Validate input before downloads, target execution or root unit creation.
-        if prepared is None:
-            candidate = config.load(path)
-            read_private(candidate["prompt_file"], 65536).decode("utf-8")
+        candidate, prompt = self.configuration(doc, path, prepared)
         acquired = self.install_payload(structured=structured)
-        self.apply(doc, path, prepared=prepared)
+        doc["initial_sender_policy_supported"] = True
+        self.apply(doc, candidate, prompt)
         self.commands.progress("Installing the stopped system service and checking it with systemd.")
         self.supervisor.install()
         doc["phase"] = "ready"
         self.save(doc)
         return {**self.view(doc), "tools_acquired": acquired}
 
-    def startup(self, state):
+    def status_text(self):
+        try:
+            return self.commands.startup_status()
+        except Error:
+            return b""
+
+    def startup(self, state, raw=None):
         service = state["ActiveState"]
         if state["Type"] == "exec":
             return {"profile": "unobserved", "local_runtime": "unobserved",
@@ -253,10 +302,10 @@ class Lifecycle:
                     "failure_stage": None, "retry": None}
         phase = None
         if service in {"activating", "failed"}:
-            try:
-                phase = STARTUP_STATUS.get(self.commands.startup_status())
-            except Error:
-                pass
+            raw = self.status_text() if raw is None else raw
+            phase = STARTUP_STATUS.get(raw)
+            if phase is None:
+                phase = observations.parse(raw, current=False)["worker"]["outcome"]
         retrying = state["SubState"] in {"auto-restart", "auto-restart-queued"}
         stage = None
         if retrying or service == "failed":
@@ -274,15 +323,26 @@ class Lifecycle:
     def view(self, doc, state=None):
         self.deployment.guard(None)
         state = self.supervisor.inspect() if state is None else state
-        startup = self.startup(state)
+        raw = self.status_text() if state["Type"] == "notify" else b""
+        startup = self.startup(state, raw)
+        current = state["ActiveState"] in {"active", "activating"} and int(state["MainPID"]) > 1
+        diagnostics = observations.parse(raw, current=current)
+        reply = doc.get("reply_observation")
+        diagnostics["reply"] = (observations.observed("operator_confirmed", reply["observed_at"],
+                                current=current and reply["invocation"] == invocation(state)
+                                and reply["revision"] == doc["revision"]) if reply else observations.observed())
+        deployment = self.deployment.report(startup["local_runtime"] == "ready")
+        prompt_source = "approved_snapshot" if deployment["prompt_revision"] else "agent_configuration"
         return {"id": doc["id"], "identity": doc["identity"], "revision": doc["revision"],
                 "desired": doc["desired"], "service_state": state["ActiveState"], "service_result": state.get("Result", "unknown"),
                 "runtime_started": startup["local_runtime"] == "ready", "buzz_response_verified": False, "startup": startup,
                 "service_account": {"uid": self.binding.uid, "name": self.binding.account},
                 "configuration": {"harness": "goose", "provider": "goose-managed", "model": None,
-                                  "profile_configured": True, "prompt_configured": True},
+                                  "profile_configured": True, "prompt_configured": True, "prompt_source": prompt_source,
+                                  "sender_policy": (None if doc.get("sender_policy_pending")
+                                                    else config.sender_summary(doc))},
                 "unit": self.binding.service, "service_scope": "system", "phase": doc["phase"],
-                "deployment": self.deployment.report(startup["local_runtime"] == "ready")}
+                "deployment": deployment, "diagnostics": diagnostics}
 
     def desired(self, doc, value):
         doc["desired"] = value
@@ -303,15 +363,15 @@ class Lifecycle:
             if state["Type"] == "notify" and state["ActiveState"] == "failed":
                 report = self.startup(state)
                 stage = report["failure_stage"]
-                raise Error(stage, f"{STARTUP_ACTIONS[stage]} Automatic retries ended. After correction, run buzz-server start {doc['id']}. Buzz reply untested.")
+                raise Error(stage, f"{STARTUP_ACTIONS[stage]} Automatic retries ended. After correction, run buzz-server start {doc['id']}.")
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.1)
         report = self.startup(state)
         stage = report["failure_stage"]
         if stage:
-            raise Error(stage, f"{STARTUP_ACTIONS[stage]} Systemd is retrying within its startup limit. Run buzz-server status {doc['id']} for the latest stage or buzz-server stop {doc['id']} to cancel. Buzz reply untested.")
-        raise Error("start_unverified", f"Startup was not observed within ten seconds. Run buzz-server status {doc['id']} to check systemd or buzz-server stop {doc['id']} to cancel. Buzz reply untested.")
+            raise Error(stage, f"{STARTUP_ACTIONS[stage]} Systemd is retrying within its startup limit. Run buzz-server status {doc['id']} for the latest stage or buzz-server stop {doc['id']} to cancel.")
+        raise Error("start_unverified", f"Startup was not observed within ten seconds. Run buzz-server status {doc['id']} to check systemd or buzz-server stop {doc['id']} to cancel.")
 
     def stop(self, doc):
         doc["desired"] = "stopped"
@@ -323,6 +383,8 @@ class Lifecycle:
 
     def execute(self, args, doc):
         op = args.operation
+        if doc.get("sender_policy_pending") and op not in {"configure", "stop", "delete", "show", "status"}:
+            raise Error("configuration_incomplete", f"Retry the original buzz-server configure {doc['id']} --config PATH command before starting or changing the worker.")
         if op in {"worker", "prompt"}:
             return self.deployment.change(args, doc, op + " " + args.deployment_operation)
         if op == "stop" and self.deployment.record and self.deployment.record["pending"]:
@@ -331,6 +393,14 @@ class Lifecycle:
         self.deployment.guard(None)
         if op in {"show", "status"}:
             return self.view(doc)
+        if op == "diagnostics":
+            state = self.supervisor.inspect()
+            token = invocation(state)
+            if token is None or state["ActiveState"] != "active" or int(state["MainPID"]) <= 1:
+                raise Error("reply_unrecorded", "Record a reply while the worker that sent it is still active.")
+            doc["reply_observation"] = {"observed_at": int(time.time()), "invocation": token, "revision": doc["revision"]}
+            self.save(doc)
+            return self.view(doc, state)
         if op == "start":
             self.commands.authenticate()
             return self.start(doc)
@@ -339,13 +409,17 @@ class Lifecycle:
             self.stop(doc)
             return self.view(doc)
         if op == "configure":
-            config.load(args.config)
+            candidate, prompt = self.configuration(doc, args.config)
+            if "sender_policy" in candidate and not self.deployment.supports_sender_policy(doc):
+                raise Error("worker_upgrade_required", f"Run buzz-server worker upgrade {doc['id']} before selecting a custom sender policy.")
             self.commands.authenticate()
             running = doc["desired"] == "running"
             self.stop(doc)
             doc["revision"] += 1
+            if config.sender_policy(candidate) != config.sender_policy(doc):
+                doc["sender_policy_pending"] = True
             self.save(doc)
-            self.apply(doc, args.config)
+            self.apply(doc, candidate, prompt)
             return self.start(doc) if running else self.view(doc)
         if op == "inference":
             if doc["desired"] != "stopped":
