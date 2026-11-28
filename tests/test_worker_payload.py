@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from threading import Thread
 import time
 import unittest
 import zipfile
@@ -14,6 +15,7 @@ from buzz_server.dependencies import ACP_FLAGS
 from buzz_server.identity import public
 from buzz_server.runtime import STARTUP_EXIT
 from buzz_server.storage import Store, atomic
+from fixture_relay import Relay
 
 
 class WorkerPayloadTests(unittest.TestCase):
@@ -24,7 +26,7 @@ class WorkerPayloadTests(unittest.TestCase):
             self.assertEqual(set(archive.namelist()), {
                 "__main__.py", "buzz_server/__init__.py", "buzz_server/config.py",
                 "buzz_server/errors.py", "buzz_server/identity.py", "buzz_server/runtime.py",
-                "buzz_server/storage.py", "buzz_server/dependencies.py"})
+                "buzz_server/profile.py", "buzz_server/storage.py", "buzz_server/dependencies.py"})
             for name in archive.namelist():
                 compile(archive.read(name), name, "exec")
             tools = archive.read("buzz_server/dependencies.py").decode()
@@ -91,8 +93,13 @@ class WorkerPayloadTests(unittest.TestCase):
             payload = root / "worker.pyz"
             payload.write_bytes(worker_payload.build())
             (root / "buzz-acp.toml").touch()
+            relay = Relay(root)
+            serving = Thread(target=relay.serve_forever, daemon=True)
+            serving.start()
+            self.addCleanup(relay.server_close)
+            self.addCleanup(relay.shutdown)
             for name, script in {
-                "buzz": """printf '{"accepted":true}\n'""",
+                "buzz": "exit 1",
                 "goose": "exit 0",
                 "buzz-acp": f"""if [ "$1" = --help ]; then echo '{" ".join(ACP_FLAGS)}'; exit 0; fi
 while [ "$#" -gt 1 ]; do
@@ -116,7 +123,7 @@ exec sleep 10
             atomic(agent / "substituted.txt", b"substituted")
             atomic(agent / "prompt.txt", b"substituted snapshot")
             store.save({"version": 1, "id": "assistant", "identity": public(key), "desired": "running", "revision": 1,
-                        "config": {"relay_url": "wss://relay.example.test", "owner": "cd" * 32,
+                        "config": {"relay_url": f"ws://127.0.0.1:{relay.server_port}", "owner": "cd" * 32,
                                    "profile": {"name": "Fixture", "about": "", "avatar": ""},
                                    "prompt_file": str(agent / "substituted.txt"),
                                    "harness": {"kind": "goose", "command": str(agent / "substituted-goose")},
@@ -134,6 +141,10 @@ exec sleep 10
                     while not ready.exists() and worker.poll() is None and time.monotonic() < deadline:
                         time.sleep(0.02)
                     self.assertTrue(ready.exists())
+                    profile = json.loads((root / "profile.json").read_text())
+                    self.assertEqual(profile["pubkey"], public(key))
+                    self.assertIs(json.loads(profile["content"])["is_agent"], True)
+                    self.assertEqual(profile["tags"], [])
                     self.assertEqual((agent / "prompt.txt").read_bytes(), b"substituted snapshot")
                 finally:
                     worker.terminate()

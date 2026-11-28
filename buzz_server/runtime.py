@@ -11,6 +11,7 @@ from .config import current, require_current, validate_relay_transport
 from .errors import Error
 from . import dependencies
 from .identity import public
+from .profile import publish_profile
 from .storage import atomic, private_dir, read_private, write_json
 
 
@@ -148,9 +149,11 @@ def prepare(store, doc, snapshot=True, *, tools=None, managed_prompt=False):
         raise Error("invalid_config", "Prompt file must be UTF-8 text, at most 64 KiB, owned by the service user with mode 0600.")
     if tools is None:
         goose = executable(c["harness"]["command"])
-        acp, buzz = tool("buzz-acp", store.root), tool("buzz", store.root)
+        acp = tool("buzz-acp", store.root)
+        tool("buzz", store.root)
     else:
-        goose, acp, buzz = (executable(tools / name) for name in ("goose", "buzz-acp", "buzz"))
+        goose, acp = (executable(tools / name) for name in ("goose", "buzz-acp"))
+        executable(tools / "buzz")
     help_check(acp, ["--system-prompt-file", "--agent-command", "--agent-args", "--model", "--permission-mode", "--respond-to", "--session-title", "--config"])
     env, work = goose_context(store, doc, tools=tools)
     if snapshot and not managed_prompt:
@@ -164,10 +167,7 @@ def prepare(store, doc, snapshot=True, *, tools=None, managed_prompt=False):
                "--agent-command", goose, "--agent-args", "acp",
                "--system-prompt-file", str(prompt_path), "--session-title", c["profile"]["name"],
                "--config", str(acp_config), "--respond-to", "owner-only", "--permission-mode", "dont-ask"]
-    # buzz's profile operation is headless; secret goes only through the environment.
-    relay = c["relay_url"].replace("wss://", "https://", 1).replace("ws://", "http://", 1)
-    profile = [buzz, "--relay", relay, "users", "set-profile", "--name", c["profile"]["name"], "--about", c["profile"]["about"], "--avatar", c["profile"]["avatar"]]
-    return command, profile, env, work
+    return command, env, work
 
 
 def event(directory, code):
@@ -185,19 +185,11 @@ def event(directory, code):
         f.write(json.dumps({"time": int(time.time()), "event": code}) + "\n")
 
 
-def profile_accepted(output):
-    try:
-        result = json.loads(output)
-    except (ValueError, UnicodeError):
-        return False
+def profile_accepted(result):
     return isinstance(result, dict) and result.get("accepted") is True
 
 
-def profile_refused(output):
-    try:
-        result = json.loads(output)
-    except (ValueError, UnicodeError):
-        return False
+def profile_refused(result):
     # Only a structured Nostr write refusal with an explicit policy prefix is
     # terminal. HTTP errors, generic rejection and missing responses may recur
     # for unrelated reasons and receive the ordinary retry budget.
@@ -225,6 +217,7 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
     directory = store.directory(ident)
     child = None
     stopping = False
+    publishing = False
 
     def terminate_child():
         if child is not None and child.poll() is None:
@@ -236,7 +229,12 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
     def stop(*_):
         nonlocal stopping
         stopping = True
+        if publishing:
+            raise InterruptedError
         terminate_child()
+
+    def profile_timeout(*_):
+        raise TimeoutError
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -253,7 +251,7 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
             return STARTUP_EXIT["local_setup_refused"] if dedicated else 0
         event(directory, "worker_starting")
         try:
-            command, profile, env, work = prepare(store, doc, tools=tools, managed_prompt=managed_prompt)
+            command, env, work = prepare(store, doc, tools=tools, managed_prompt=managed_prompt)
         except Error as error:
             if error.code in {"identity_mismatch", "invalid_config", "obsolete_provider", "prerequisite_missing"}:
                 refusal = "local_setup_refused"
@@ -263,20 +261,22 @@ def worker(store, ident, *, dedicated=False, tools=None, managed_prompt=False):
         phase = "profile_unconfirmed"
         if dedicated:
             notify_startup(phase)
-        profile_env = {key: env[key] for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
-        child = subprocess.Popen(profile, env=profile_env, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        if stopping:
-            terminate_child()
+        previous_alarm = signal.signal(signal.SIGALRM, profile_timeout)
         try:
-            output, _ = child.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.communicate()
-            raise Error("profile_failed", "Profile update timed out.")
+            publishing = True
+            if stopping:
+                return 0
+            signal.setitimer(signal.ITIMER_REAL, 20)
+            config = doc["config"]
+            result = publish_profile(config["relay_url"], config["profile"], env["BUZZ_PRIVATE_KEY"], doc["identity"])
+        finally:
+            publishing = False
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_alarm)
         if stopping:
             return 0
-        if child.returncode or not profile_accepted(output):
-            if dedicated and child.returncode == 0 and profile_refused(output):
+        if not profile_accepted(result):
+            if dedicated and profile_refused(result):
                 refusal = "profile_refused"
             raise Error("profile_failed", "Profile update failed.")
         event(directory, "profile_applied")

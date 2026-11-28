@@ -142,7 +142,9 @@ relay from the operator's Buzz identity:
 buzz users get --pubkey "$AGENT_PUBKEY"
 ```
 
-Check that the returned `pubkey` matches the agent key you copied.
+Check that the returned `pubkey` matches the agent key you copied. The signed
+profile contains `is_agent: true`, which compatible Buzz Desktop versions use
+to list the identity under **Agents** in the mention picker.
 
 ## First reply
 

@@ -123,6 +123,15 @@ class Acceptance:
         created = self.run("create", "disposable", "--config", str(path))
         identity = created["identity"]
         assert created["desired"] == "stopped" and not created["runtime_started"]
+        profile_path = self.root / "fixture/profile.json"
+        assert not profile_path.exists()
+
+        def check_profile(name):
+            profile = json.loads(profile_path.read_text())
+            assert profile["pubkey"] == identity and profile["tags"] == []
+            metadata = json.loads(profile["content"])
+            assert metadata["display_name"] == name and metadata["is_agent"] is True
+
         assert len(self.run("list")["agents"]) == 1
         assert self.run("show", "disposable")["identity"] == identity
         unavailable = self.root / "fixture/unavailable"
@@ -136,6 +145,7 @@ class Acceptance:
         unavailable.unlink()
         # No start/reset-failed after the fixture begins accepting requests.
         wait_until(lambda: self.run_quiet_status()["runtime_started"], (relay, manager))
+        check_profile("Disposable")
         print("PASS automatic recovery after four failed starts, without operator action", flush=True)
         marker = self.state / "agents/disposable/home/fixture-acp-initialized"
         wait_until(marker.exists, (relay,))
@@ -179,7 +189,9 @@ class Acceptance:
         path.write_text(json.dumps(c))
         edited = self.run("configure", "disposable", "--config", str(path))
         assert edited["revision"] == 2 and edited["identity"] == identity and edited["runtime_started"]
+        check_profile("Reconfigured")
         assert self.run("restart", "disposable")["identity"] == identity
+        check_profile("Reconfigured")
         self.run("logs", "disposable")
         # A running service comes back after an actual private-manager restart.
         self.systemctl("stop", "buzz-server-disposable.service")
