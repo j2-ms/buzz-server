@@ -37,10 +37,13 @@ def relay_tls_context():
 def post(relay, endpoint, value, key, pubkey):
     secure = relay.scheme == "wss"
     scheme = "https" if secure else "http"
+    default_port = 443 if secure else 80
+    # An explicit port prevents http.client from splitting a bare IPv6 host.
+    port = relay.port if relay.port is not None else default_port
     host = relay.hostname.encode("idna").decode("ascii")
     authority = f"[{host}]" if ":" in host else host
-    if relay.port is not None and relay.port != (443 if secure else 80):
-        authority += f":{relay.port}"
+    if port != default_port:
+        authority += f":{port}"
     path = quote(relay.path.rstrip("/") + endpoint, safe="/%:@!$&'()*+,;=")
     body = json_bytes(value)
     tags = [["u", f"{scheme}://{authority}{path}"], ["method", "POST"],
@@ -48,8 +51,8 @@ def post(relay, endpoint, value, key, pubkey):
     proof = signed_event(key, pubkey, 27235, "", tags, int(time.time()))
     headers = {"Authorization": "Nostr " + b64encode(json_bytes(proof)).decode("ascii"),
                "Content-Type": "application/json"}
-    connection = (HTTPSConnection(host, relay.port, timeout=10, context=relay_tls_context())
-                  if secure else HTTPConnection(host, relay.port, timeout=10))
+    connection = (HTTPSConnection(host, port, timeout=10, context=relay_tls_context())
+                  if secure else HTTPConnection(host, port, timeout=10))
     # Direct requests never follow redirects or consult proxy settings.
     with closing(connection):
         connection.request("POST", path, body, headers)

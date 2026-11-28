@@ -1,5 +1,6 @@
 from base64 import b64decode
 from hashlib import sha256
+from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
@@ -106,3 +107,18 @@ class ProfileTests(unittest.TestCase):
             nonces.add(tags.pop("nonce"))
             self.assertEqual(tags, {})
         self.assertEqual(len(nonces), 2)
+
+    def test_ipv6_relay_without_explicit_port(self):
+        response = MagicMock(status=200)
+        response.__enter__.return_value = response
+        response.read.return_value = b"[]"
+        pubkey = public(KEY)
+        for relay_url, scheme, port in [("ws://[::1]/", "http", 80), ("wss://[::1]/", "https", 443)]:
+            with (self.subTest(relay_url=relay_url),
+                  patch.object(HTTPConnection, "request", autospec=True) as request,
+                  patch.object(HTTPConnection, "getresponse", return_value=response)):
+                self.assertEqual(post(urlsplit(relay_url), "/query", [], KEY, pubkey), [])
+                connection, _, _, _, headers = request.call_args.args
+                self.assertEqual((connection.host, connection.port), ("::1", port))
+                proof = json.loads(b64decode(headers["Authorization"].removeprefix("Nostr ")))
+                self.assertEqual(dict(proof["tags"])["u"], f"{scheme}://[::1]/query")
