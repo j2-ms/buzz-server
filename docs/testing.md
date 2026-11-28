@@ -174,6 +174,29 @@ Report an observed reply and any limitations for the named combination. A
 loopback fixture qualifies the integration under those conditions. Hosted
 provider access and production relay acceptance require their own trials.
 
+### Run the loopback model fixture
+
+In the isolated environment, prepare a private directory and put one synthetic
+API key in its `provider-token` file. From an unprivileged fixture login run
+`timeout 15m python3 -B tests/fixture_openai.py --disposable --directory DIR`.
+Configure the stopped Goose agent for the OpenAI-compatible base URL
+`http://127.0.0.1:8765/v1`, model `fixture-model`, and the synthetic key. Use
+Goose's developer shell tool with automatic approval in this disposable
+account. The fixture returns a shell call containing only a fixed `buzz
+messages send` invocation for the channel and parent event supplied by the
+test operator. Keep every endpoint on isolated loopback, including the relay.
+
+Send a mention using the procedure in [First reply](quickstart.md#first-reply).
+As soon as the send returns, write the channel UUID and returned event ID into
+`DIR/arm` on a single line separated by one space. After readback, remove
+`DIR/arm` so it cannot affect another turn. The `GET /fixture` counters report
+model requests, rejected authorization and issued shell calls. Compare those
+counters before and after each denied sender to verify that the event did not
+reach the harness. For renewal, change `provider-token` to a second synthetic
+key so the old key receives HTTP 401. Enter the new value using the Goose
+wizard on the stopped agent and verify a new signed reply. Save test verdicts
+and artifact identifiers while keeping the private fixture files off the PR.
+
 ## Installed CLI and update consent (offline)
 
 `tests/test_update_pty.py` installs two synthetic zipapps with a local release
