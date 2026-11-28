@@ -112,6 +112,68 @@ The source-installer acceptance mode remains available without `--releases`.
 Independent review, both disposable modes, public anonymous asset downloads,
 a fresh OS install and live provider/relay verification remain separate gates.
 
+## Qualify a dedicated worker release
+
+The managed amd64 combinations are Ubuntu 24.04 LTS or 26.04 LTS with the
+Goose harness. The current runtime pins are Buzz desktop release 0.5.30
+(`buzz` and `buzz-acp`) and Goose 1.60.2. Choose and name the OS combination
+in every result. Track alternate harnesses through [issue #15](https://github.com/j2-ms/buzz-server/issues/15)
+and qualify each before claiming support or a renewal path for it.
+
+1. On a disposable VM, record the OS release, architecture, Python and systemd
+   versions, git commit, CLI version and the built release's SHA-256. Give the
+   pre-existing fixture accounts private homes and use explicit operator sudo.
+2. Fetch the platform assets named in [the pin table in code](../buzz_server/dependencies.py).
+   Compare `sha256sum` and bytes to the pinned archive metadata and compare
+   the extracted binaries with `member_sha256`. Confirm the Buzz package
+   version with `dpkg-deb -f ARCHIVE Version` and check `buzz --help` and
+   `buzz-acp --help` from those exact extracted binaries. Verify `goose
+   --version` and its `acp` and `configure` help. The pinned Buzz binaries
+   do not implement a standalone `--version` flag. Record the upstream release
+   tag and resolved commit for each asset. Verify a published GitHub build
+   attestation with `gh attestation verify FILE --repo OWNER/REPO` where one
+   exists. Report archive-integrity results and upstream provenance separately.
+3. Use a network-isolated relay and a deterministic loopback model fixture.
+   Record their versions or digests and fixture configuration. Create the
+   dedicated agent, configure Goose, admit the identity when required and
+   follow [First reply](quickstart.md#first-reply). Confirm the source and reply
+   signatures, event authors, channel and reply linkage from readback. Check
+   that known-silent or failed cases and a confirmed reply are distinguishable
+   in status. Do not use replies from a failed-auth notice as successful model
+   replies.
+4. Start one agent and explicitly start and stop a second agent. Record the
+   VM boot ID from `/proc/sys/kernel/random/boot_id` and both unit enablement
+   states. Reboot the VM, confirm the boot ID changed, then check that the
+   enabled agent became ready with its original key and can reply again. Verify
+   the intentionally stopped unit stayed inactive and disabled. Record whether
+   the relay/model fixture needed to be restarted after boot.
+5. From an older installed CLI and deployed worker, use the ordinary CLI update
+   or install a candidate into that prefix with the same state binding. Record
+   the active worker before and after CLI activation. Run `buzz-server worker
+   upgrade ID`, confirm the selected archive and running version, and check a
+   new reply under the same key. Run `buzz-server worker rollback ID` with
+   dependency downloads disabled and confirm the prior worker and a new reply.
+   Check that a stopped agent stays disabled through the worker switch.
+6. Exercise [provider renewal](quickstart.md#renew-provider-access) with invalid
+   synthetic authorization and replacement access to the fixture. Check
+   cancellation/failure separately. Exercise the [clean-host restore](recovery.md)
+   on a second prepared VM. Time the restore, include the incomplete-backup
+   control, and confirm the old system unit cannot send as the restored key.
+
+For sender policy qualification, use a disposable channel with signed events
+from the principal, a peer with a verified same-owner attestation on its
+profile, an unrelated sender to be allowlisted, and an unlisted sender. Check
+principal and sibling replies in `owner-only`, denied unrelated and unlisted
+senders, and admission of only the chosen additional sender in `allowlist`.
+Repeat after restart, then opt into `anyone` and check a reply in the joined
+channel and continued denial of a DM from an unrelated sender. Check that each
+denied sender can publish the message and that the agent is active, so a routing
+or simple transport failure does not count as an author-gate result.
+
+Report an observed reply and any limitations for the named combination. A
+loopback fixture qualifies the integration under those conditions. Hosted
+provider access and production relay acceptance require their own trials.
+
 ## Installed CLI and update consent (offline)
 
 `tests/test_update_pty.py` installs two synthetic zipapps with a local release

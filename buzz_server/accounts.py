@@ -80,6 +80,14 @@ class Binding:
         return {"version": 1, **self.__dict__}
 
 
+def binding_for(root, ident, entry):
+    agent_id(ident)
+    namespace = sha256((str(os.getuid()) + "\0" + str(root)).encode()).hexdigest()[:24]
+    service = f"buzz-server-account-{namespace}-{ident}.service"
+    data = str(Path(entry.pw_dir) / ".local/share/buzz-server-managed" / namespace / ident)
+    return Binding(ident, entry.pw_name, entry.pw_uid, entry.pw_gid, entry.pw_dir, data, service)
+
+
 class Bindings:
     def __init__(self, store):
         self.store = store
@@ -108,11 +116,7 @@ class Bindings:
             refused()
 
     def expected(self, ident, entry):
-        agent_id(ident)
-        namespace = sha256((str(os.getuid()) + "\0" + str(self.store.root)).encode()).hexdigest()[:24]
-        service = f"buzz-server-account-{namespace}-{ident}.service"
-        data = str(Path(entry.pw_dir) / ".local/share/buzz-server-managed" / namespace / ident)
-        return Binding(ident, entry.pw_name, entry.pw_uid, entry.pw_gid, entry.pw_dir, data, service)
+        return binding_for(self.store.root, ident, entry)
 
     def reserve(self, ident, name):
         self.trusted_layout()

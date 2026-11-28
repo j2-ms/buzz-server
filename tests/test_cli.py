@@ -40,6 +40,13 @@ class ParserTests(unittest.TestCase):
                            'JSON and redirected runs skip offers', 'update --auto on'):
                 self.assertIn(detail, help_text)
 
+    def test_sender_policy_requires_unambiguous_selection(self):
+        self.assertTrue(config.valid_sender_policy({"mode": "allowlist", "allowlist": ["01" * 32]}))
+        self.assertTrue(config.valid_sender_policy({"mode": "anyone", "allowlist": []}))
+        for mode, keys in (("nobody", []), ("allowlist", []), ("allowlist", ["a1" * 31]),
+                           ("allowlist", ["b1" * 32] * 2), ("anyone", ["c1" * 32])):
+            self.assertFalse(config.valid_sender_policy({"mode": mode, "allowlist": keys}))
+
 
 class FakeSystemd:
     """Unit-test double only. Never used by disposable acceptance."""
@@ -534,7 +541,7 @@ class RuntimeTests(unittest.TestCase):
                "config": {"provider": {"kind": "goose-managed"}, "relay_url": "fixture", "profile": {}}}
         env = {key: "fixture" for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
         for stopping, expected in ((False, 76), (True, 0)):
-            runtime = Mock(pid=123)
+            runtime = Mock(pid=123, stderr=io.BytesIO())
             runtime.poll.return_value = None
             signals = {}
             ready_at_exit = []
@@ -555,7 +562,10 @@ class RuntimeTests(unittest.TestCase):
                   patch("buzz_server.runtime.subprocess.Popen", return_value=runtime),
                   patch("buzz_server.runtime.time.sleep")):
                 self.assertEqual(worker(store, "agent", dedicated=True), expected)
-            notify.assert_called_with("ready", ready=True)
+            ready = [call.args[0] for call in notify.call_args_list if call.kwargs.get("ready")]
+            self.assertEqual(len(ready), 1)
+            self.assertIn("|ready:", ready[0])
+            self.assertIn("|stopped:" if stopping else "|exited:", notify.call_args.args[0])
             self.assertEqual(ready_at_exit, [True])
             self.assertEqual(runtime.terminate.call_count, int(stopping))
             self.assertFalse((directory / "ready.json").exists())

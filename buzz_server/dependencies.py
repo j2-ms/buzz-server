@@ -29,10 +29,13 @@ PACKAGES = (
     dict(name='buzz', version='desktop-v0.5.30',
          url='https://github.com/block/buzz/releases/download/desktop-v0.5.30/Buzz_0.5.30_amd64.deb',
          size=120825052, sha256='1834e4db989637a800e481d48ea2d0a743d31d62bcb9d0361ca8d253828324d6',
+         member_sha256={'buzz': '714fadf286eea505bbb565b8b63e90b2338607466e47feac109dbfefc38489bb',
+                        'buzz-acp': '1f28f3f10db958044aa4c5beac84138aaa7c12c506361f02fdb3b5d6ed745766'},
          members={'usr/bin/buzz': ('buzz', 18855512), 'usr/bin/buzz-acp': ('buzz-acp', 18202248)}),
     dict(name='goose', version='v1.60.2',
          url='https://github.com/aaif-goose/goose/releases/download/v1.60.2/goose-x86_64-unknown-linux-gnu.tar.gz',
          size=63566822, sha256='5f6e463621a8428617ae4870eecee7a00a253e9bbfccb6340dfaa4f0ec2aaf32',
+         member_sha256={'goose': '9de0b3a3a1a932c6ef91c488e408f745101566a03e632ce8dcfcaf7c65c8782d'},
          members={'./goose': ('goose', 213003128)}),
 )
 MAX_TAR = 512 * 1024 * 1024
@@ -270,15 +273,57 @@ def interactive():
     return all(s.isatty() for s in (sys.stdin, sys.stdout, sys.stderr))
 
 
-def stage_pins(directory, *, show_progress=False):
+def reuse_package(package, source, destination):
+    """Copy and verify the exact bytes that will be staged, without executing them."""
+    path, uid, mode = source
+    pins = package.get("member_sha256", {})
+    try:
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            return False
+        for name, size in package["members"].values():
+            if name not in pins:
+                return False
+            fd = os.open(path / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != uid
+                        or stat.S_IMODE(info.st_mode) != mode or info.st_size != size):
+                    return False
+                digest = hashlib.sha256()
+                remaining = size
+                with (destination / name).open("wb") as copy:
+                    while remaining:
+                        block = stream.read(min(65536, remaining))
+                        if not block:
+                            return False
+                        digest.update(block)
+                        copy.write(block)
+                        remaining -= len(block)
+                if stream.read(1) or digest.hexdigest() != pins[name]:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def stage_pins(directory, *, local=(), show_progress=False):
     supported()
     try:
         for package in PACKAGES:
-            with tempfile.TemporaryDirectory(dir=directory) as temp:
-                source = Path(temp)
-                acquire(package, source, show_progress=show_progress)
-                for name, _ in package["members"].values():
-                    os.replace(source / name, directory / name)
+            members = package["members"].values()
+            for source in local:
+                with tempfile.TemporaryDirectory(dir=directory) as temp:
+                    stage = Path(temp)
+                    if reuse_package(package, source, stage):
+                        for name, _ in members:
+                            os.replace(stage / name, directory / name)
+                        break
+            else:
+                with tempfile.TemporaryDirectory(dir=directory) as temp:
+                    stage = Path(temp)
+                    acquire(package, stage, show_progress=show_progress)
+                    for name, _ in members:
+                        os.replace(stage / name, directory / name)
     except (OSError, ValueError, EOFError, tarfile.TarError, zlib.error, subprocess.SubprocessError):
         refused()
 

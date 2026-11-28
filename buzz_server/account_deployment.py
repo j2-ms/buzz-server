@@ -1,6 +1,7 @@
 """Operator-side selection of dedicated worker payloads and approved prompts."""
 from contextlib import contextmanager
 import hashlib
+import os
 from pathlib import Path
 import re
 import secrets
@@ -31,7 +32,8 @@ def valid_worker(value):
         return False
     if set(value) == {"legacy"}:
         return value["legacy"] in ("exec", "notify")
-    if (set(value) != {"slot", "version", "sha256", "tools"} or not valid_slot(value["slot"])
+    if (set(value) - {"sender_policy_supported"} != {"slot", "version", "sha256", "tools"}
+            or value.get("sender_policy_supported", True) is not True or not valid_slot(value["slot"])
             or not isinstance(value["version"], str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["version"])
             or not digest(value["sha256"], 64) or not isinstance(value["tools"], dict)
             or set(value["tools"]) != {"buzz", "goose"}):
@@ -61,7 +63,7 @@ def same_slot(left, right):
 
 
 def worker_metadata(payload):
-    return {"version": __version__, "sha256": hashlib.sha256(payload).hexdigest(),
+    return {"version": __version__, "sha256": hashlib.sha256(payload).hexdigest(), "sender_policy_supported": True,
             "tools": {p["name"]: {"version": p["version"], "sha256": p["sha256"]} for p in dependencies.PACKAGES}}
 
 
@@ -125,6 +127,13 @@ class Deployment:
         if self.record:
             self.lifecycle.supervisor = self.supervisor(self.record["active"])
 
+    def supports_sender_policy(self, doc, worker=None):
+        if worker is None and self.record:
+            worker = self.record["active"]["worker"]
+        if worker is None or "legacy" in worker:
+            return doc.get("initial_sender_policy_supported", False)
+        return worker.get("sender_policy_supported", False)
+
     def validate(self, supervisor):
         if supervisor.payload is not None:
             for name, mode in PAYLOAD_MODES.items():
@@ -166,11 +175,17 @@ class Deployment:
         if matches_worker(active, version):
             return active
         slot = slot_for(active, previous)
+        local = [(self.commands.deployment_directory(worker["slot"], prompt=False), 0, 0o755)
+                 for worker in (active, previous) if worker and "slot" in worker]
+        try:
+            local.append((dependencies.bin_dir(self.lifecycle.bindings.store.root), os.getuid(), 0o700))
+        except Error:
+            pass
         with tempfile.TemporaryDirectory(prefix=".deployment-", dir=self.path.parent) as temp:
             stage = Path(temp)
             (stage / "worker.pyz").write_bytes(payload)
             (stage / "buzz-acp.toml").touch()
-            dependencies.stage_pins(stage, show_progress=not structured and dependencies.interactive())
+            dependencies.stage_pins(stage, local=local, show_progress=not structured and dependencies.interactive())
             self.commands.authenticate()
             self.commands.stage_deployment(slot, {name: stage / name for name in PAYLOAD_MODES})
         return {"slot": slot, **version}
@@ -229,6 +244,9 @@ class Deployment:
                 raise Error("rollback_unavailable", f"No previous {field} revision is available.")
             if field == "worker" and "legacy" in candidate and active["prompt"] is not None:
                 raise Error("prompt_active", f"Run buzz-server prompt clear {doc['id']} before rolling back to the original worker.")
+            if (field == "worker" and "sender_policy" in doc
+                    and not self.supports_sender_policy(doc, candidate)):
+                raise Error("sender_policy_active", "Select owner-only with configure before rolling back to a worker that cannot enforce a custom sender policy.")
 
         if candidate == active[field]:
             self.validate(lifecycle.supervisor)

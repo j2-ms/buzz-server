@@ -22,7 +22,8 @@ class AccountSystemd:
                   "UnitFileState", "Result", "DropInPaths", "NeedDaemonReload", "KillMode", "ControlGroup",
                   "User", "Group", "ExecStart", "ExecCondition", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost",
                   "ExecReload", "Environment", "EnvironmentFiles", "PassEnvironment", "WorkingDirectory",
-                  "RootDirectory", "RootImage", "NoNewPrivileges", "Type", "NotifyAccess", "ExecMainCode", "ExecMainStatus")
+                  "RootDirectory", "RootImage", "NoNewPrivileges", "Type", "NotifyAccess", "ExecMainCode", "ExecMainStatus",
+                  "InvocationID")
 
     def __init__(self, commands, *, worker_slot=None, prompt_slot=None, legacy_type=None):
         self.commands = commands

@@ -148,6 +148,7 @@ def apply():
                 key = read_private(key_path, 64).decode("ascii")
                 identity = public(key)
             else:
+                require(REQUEST.get("identity") is None)
                 key, identity = generate()
                 atomic(key_path, key.encode())
             doc = {"version": 1, "id": ident, "identity": identity,

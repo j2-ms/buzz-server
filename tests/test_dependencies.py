@@ -37,6 +37,39 @@ class DependencyTests(unittest.TestCase):
         with self.assertRaises(Error):
             d.resolve('arbitrary', self.store.root)
 
+    def test_stage_reuses_only_exact_platform_member_hashes(self):
+        packages = tuple({"name": name, "members": {name: (name, 3)},
+                          "member_sha256": {name: hashlib.sha256(value).hexdigest()}}
+                         for name, value in (("buzz", b"one"), ("goose", b"two")))
+        source = d.bin_dir(self.store.root, create=True)
+        for name, data in (("buzz", b"one"), ("goose", b"two")):
+            path = source / name
+            path.write_bytes(data)
+            path.chmod(0o700)
+        stage = Path(self.temp.name) / "stage"
+        stage.mkdir(mode=0o700)
+
+        def acquire(package, directory, **kwargs):
+            (directory / package["name"]).write_bytes(b"new")
+
+        with patch.object(d, "supported"), patch.object(d, "PACKAGES", packages), patch.object(d, "acquire", side_effect=acquire) as fetch:
+            local = [(source, os.getuid(), 0o700)]
+            d.stage_pins(stage, local=local)
+            fetch.assert_not_called()
+            (source / "goose").write_bytes(b"bad")
+            d.stage_pins(stage, local=local)
+            self.assertEqual([c.args[0]["name"] for c in fetch.call_args_list], ["goose"])
+            self.assertEqual((stage / "buzz").read_bytes(), b"one")
+            self.assertEqual((stage / "goose").read_bytes(), b"new")
+
+            fetch.reset_mock()
+            (source / "goose").write_bytes(b"two")
+            packages[0]["member_sha256"]["buzz"] = hashlib.sha256(b"new").hexdigest()
+            d.stage_pins(stage, local=local)
+            self.assertEqual([c.args[0]["name"] for c in fetch.call_args_list], ["buzz"])
+            self.assertEqual((stage / "buzz").read_bytes(), b"new")
+            self.assertEqual((stage / "goose").read_bytes(), b"two")
+
     def test_explicit_refresh_exchanges_complete_directory_at_same_paths(self):
         directory = d.bin_dir(self.store.root, create=True)
         old = directory / "goose"

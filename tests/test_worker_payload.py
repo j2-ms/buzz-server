@@ -25,7 +25,7 @@ class WorkerPayloadTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             self.assertEqual(set(archive.namelist()), {
                 "__main__.py", "buzz_server/__init__.py", "buzz_server/config.py",
-                "buzz_server/errors.py", "buzz_server/identity.py", "buzz_server/runtime.py",
+                "buzz_server/errors.py", "buzz_server/identity.py", "buzz_server/observations.py", "buzz_server/runtime.py",
                 "buzz_server/profile.py", "buzz_server/storage.py", "buzz_server/dependencies.py"})
             for name in archive.namelist():
                 compile(archive.read(name), name, "exec")

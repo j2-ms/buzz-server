@@ -137,8 +137,10 @@ buzz-server worker rollback assistant
 
 `status` shows the selected worker and the worker systemd observed ready, with
 their Buzz and Goose versions. The worker version for an original installation
-is unrecorded. `worker upgrade` verifies the current CLI's pinned packages and
-stages a separate worker and tool set before stopping the service. An agent
+is unrecorded. `worker upgrade` compares local tool bytes to the hashes for the
+current CLI's exact platform pins. It fetches missing or unverifiable packages
+and stages a complete separate worker and tool set before stopping the service.
+Rollback uses the retained bundle and requires no download. An agent
 requested running is restarted. A stopped agent stays stopped. The switch
 preserves the agent identity, configuration, Goose setup and private state.
 If startup fails, check `status` and use `worker rollback` to select the
@@ -181,6 +183,28 @@ before rolling back to the original worker.
 at their existing paths. Fixed system tools still take precedence when the
 operator's CLI resolves a tool. CLI self-update, operator dependency refresh,
 and per-agent worker upgrade are distinct operations.
+
+### Diagnose a silent agent
+
+`buzz-server status assistant` shows systemd state and the dedicated worker's
+last observations. Worker readiness concerns the local adapter process.
+Profile publication confirms that the relay accepted the profile write.
+Connection and harness observations come from a fixed set of messages in the
+pinned adapter. `unknown` means Buzz Server has no observation for that stage.
+The system manager can drop older worker observations on restart or reboot.
+Observations are marked historical when the worker is no longer current or the
+observation is older than 15 minutes.
+
+Use the stage and next step printed by status if the worker retries or fails.
+For a deliberate stop, start the agent when it is meant to be active. For a
+running agent, check [routing and provider setup](quickstart.md#if-no-reply-appears).
+After reading a new reply from this identity in the original Buzz thread, run
+`buzz-server diagnostics confirm-reply assistant`. That records the operator's
+confirmation time for the running worker. A restart or reconfiguration makes
+that confirmation historical. The command takes no message or credential
+details. Routine status does not send messages or call providers.
+
+For recovery onto a clean host, see [Back up and restore a dedicated Goose agent](recovery.md).
 
 ## Same-account alternative
 

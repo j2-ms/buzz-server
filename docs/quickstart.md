@@ -202,15 +202,12 @@ mention.
 1. Check the receiving relay and channel. Ask the relay operator to confirm
    that the agent key is admitted, and verify channel membership for that
    exact key.
-2. Confirm you sent the mention from the hex public key in `owner` and
-   targeted the exact agent key.
+2. Confirm the sender is eligible under the [sender policy](#sender-policy)
+   and the mention targets the exact agent key.
 3. Check `buzz-server status assistant` and fix startup failures first. For a
    same-account agent, `buzz-server logs assistant` shows sanitized lifecycle
-   events. Dedicated agents report startup stages in status.
-4. To redo provider setup, run `buzz-server stop assistant`, then
-   `buzz-server inference configure assistant`, then `buzz-server start assistant`.
-   If Goose already has a configuration, choose **Configure Providers** and
-   continue with the [provider selection](#custom-openai-compatible-endpoint).
+   events. Dedicated agents report [last-observed outcomes](service-accounts.md#diagnose-a-silent-agent).
+4. If provider access expired or was revoked, follow [Renew provider access](#renew-provider-access).
 5. If the original thread still has no reply, retry once with a synthetic
    message asking the agent to post in the original thread. Publishing a reply
    requires the Buzz messaging tool. If it still fails, report CLI and Goose
@@ -261,10 +258,44 @@ mention.
 4. [Configure Goose](#configure-goose), then continue with
    [Admit the key and start](#admit-the-key-and-start) to get the public key.
 
+### Sender policy
+
+Guided creation uses and displays `owner-only`. Scripted creation can add this
+optional object to the [configuration JSON](#configuration-file-method):
+
+```json
+{"sender_policy": {"mode": "owner-only", "allowlist": []}}
+```
+
+| Mode | Eligible senders in joined channels |
+| --- | --- |
+| `owner-only` | The configured operator and agents with a verified attestation to that same owner. |
+| `allowlist` | The operator, verified same-owner agents and specifically listed human or agent keys. Include 1–128 distinct public keys as 64 lowercase hexadecimal characters. |
+| `anyone` | Any eligible sender. Select this explicitly with an empty `allowlist`. |
+
+Relay admission, channel membership and mention routing still apply. Buzz ACP
+admits only the operator and verified same-owner agents in DMs, including in
+`allowlist` and `anyone` mode. This setting never issues or changes an owner
+attestation. See the [pinned Buzz ACP sender gate](https://github.com/block/buzz/blob/desktop-v0.5.30/crates/buzz-acp/src/lib.rs#L569-L590).
+
+For example, create a coordinator and a worker with their own identities. In
+the worker's configuration, select `allowlist` and put the coordinator's public
+hex key in the `allowlist` array. Add both agents to a shared channel and have
+the coordinator mention the worker there. The worker still rejects other
+unlisted senders outside the implicit operator and same-owner access.
+
+Run `buzz-server configure worker --config "$config"` with the full definition
+to change the policy in place. Omission keeps the previous selection when
+reconfiguring and defaults to `owner-only` for new agents. Status reports the
+selected mode and the size of the allowlist. Dedicated agents with an older
+worker need `buzz-server worker upgrade worker` before selecting a custom
+policy. Select `owner-only` before rolling back to a worker that predates this
+setting.
+
 ## Operate and recover
 
 - `list` shows agents bound to this operator and existing same-account agents. `logs` is available for same-account lifecycle events only. For automation put `--json` **before** the subcommand; successes go to stdout and errors to stderr.
-- After editing the JSON or prompt, run `buzz-server configure assistant --config "$config"`. This replaces the full configuration, preserves the agent key, and restarts an agent set to run. An intentionally stopped agent stays stopped. This command does not run Goose setup.
+- After editing the JSON or prompt, run `buzz-server configure assistant --config "$config"`. This replaces the configuration, preserves the agent key, and restarts an agent set to run. Omit the sender policy to keep the selected policy. An intentionally stopped agent stays stopped. This command does not run Goose setup.
 - `start` enables the unit in its manager. Same-account services use
   `systemd --user` and depend on the operator's user manager. Dedicated services
   use the system manager. For logout and reboot verification see
@@ -287,6 +318,32 @@ mention.
   Buzz messages are retained.
 - Updating or reinstalling the operator CLI does not update staged dedicated workers or tools. There is no fleet upgrade mechanism. Keep the operator state/bindings and do not edit units by hand. CLI uninstall refuses dedicated bindings until delete is verified; incomplete create/delete operations must be retried first. Same-account `start` still refreshes its user unit after a CLI reinstall.
 - Loaded unit overrides are not supported. A conflict blocks management commands, including `stop`, `status`, and `show`, and can make `list` fail even when other agents are unaffected. Shared overrides in `service.d/` or `buzz-server-.service.d/` on the applicable manager's search path can affect every managed agent. Inspect the conflicts with `systemctl --system cat UNIT` using the exact `unit` in JSON status; use `systemctl --user cat buzz-server-<id>.service` for same-account units. Ask the administrator responsible for the override to remove the conflict, reload that manager, and retry `stop` before deleting anything. A failed stop is not proof the agent is down.
+
+### Renew provider access
+
+From the operator login, explicitly stop the dedicated agent before repeating
+Goose's native setup. Verify that systemd reports it stopped. Use the same
+agent ID throughout.
+
+```sh
+buzz-server stop assistant
+buzz-server status assistant
+buzz-server inference configure assistant
+```
+
+In Goose, choose **Configure Providers**, select the existing or replacement
+provider, and complete its normal credential entry or sign-in. Enter the new
+provider authorization in Goose's terminal. Goose keeps it in the dedicated
+account's private per-agent HOME. Keep credentials from your own login out of
+the agent's setup. The [Goose state layout](#goose-setup-and-private-state)
+describes the access boundary.
+
+If you cancel or Goose reports an error, keep the agent stopped and retry
+setup. Some Goose cancellation paths exit cleanly. A clean exit alone gives
+no evidence that Goose stored new authorization or that the provider accepts
+it. After completing provider setup, run `buzz-server start assistant` and
+[read back a new reply](#first-reply) from the original Buzz public key. The
+existing identity, profile, channel memberships and working files carry over.
 
 ## Goose setup and private state
 

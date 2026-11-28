@@ -4,7 +4,7 @@ import io
 import zipfile
 
 
-MODULES = ("__init__", "config", "errors", "identity", "profile", "runtime", "storage")
+MODULES = ("__init__", "config", "errors", "identity", "observations", "profile", "runtime", "storage")
 TOOL_FUNCTIONS = ("refused", "bin_dir", "resolve", "child_path")
 TOOL_CONSTANTS = ("SYSTEM_PATH", "NAMES", "FAILURE")
 ENTRY = b'''"""Worker only: no operator management commands."""

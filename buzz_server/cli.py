@@ -30,6 +30,7 @@ UPDATE_OFFERS = (
     "limit. 'buzz-server update --auto on' enables offers without checking now."
 )
 DOCTOR_SCOPE = "Worker startup, provider access, credentials, relay access and Buzz replies were not checked."
+FIRST_REPLY_URL = "https://github.com/j2-ms/buzz-server/blob/main/docs/quickstart.md#first-reply"
 
 
 def parser():
@@ -76,12 +77,16 @@ def parser():
             sub.add_argument("--config", required=(op == "configure"), help="Private JSON configuration file; configure replaces the complete config")
         if op == "create":
             sub.add_argument("--account", help="Existing dedicated unprivileged account; authorize fixed system tools through explicit sudo")
+            sub.add_argument("--expect-identity", help="Require a restored dedicated agent key matching this Buzz public key")
         if op == "logs":
             sub.add_argument("--lines", type=int, default=30)
     sub = commands.add_parser("inference", help="Manage inference through upstream Goose")
     inference = sub.add_subparsers(dest="inference_operation", required=True, parser_class=Parser)
     setup = inference.add_parser("configure", help="Run Goose setup interactively for a stopped agent")
     setup.add_argument("id", type=agent_id)
+    diagnostics = commands.add_parser("diagnostics", help="Record a reply observed in Buzz for a dedicated agent")
+    diagnostic_ops = diagnostics.add_subparsers(dest="diagnostic_operation", required=True, parser_class=Parser)
+    diagnostic_ops.add_parser("confirm-reply", help="Record your readback of a new reply from the currently active worker").add_argument("id", type=agent_id)
     worker = commands.add_parser("worker", help="Manage the worker payload of a dedicated agent")
     worker_ops = worker.add_subparsers(dest="deployment_operation", required=True, parser_class=Parser)
     worker_ops.add_parser("upgrade", help="Install this CLI's pinned worker and tools for one agent").add_argument("id", type=agent_id)
@@ -98,6 +103,7 @@ def parser():
     tools_ops.add_parser("refresh", help="Verify and replace the operator's private tools with this CLI's pins")
     sub = commands.add_parser("account-plan", help="Render the optional pre-existing service-account administration plan; changes nothing")
     sub.add_argument("--account", required=True)
+    sub.add_argument("--id", type=agent_id, help="Also preview the target data path and unit for this agent ID")
     return p
 
 
@@ -118,7 +124,8 @@ def view(store, supervisor, doc):
             "runtime_started": ready, "buzz_response_verified": False,
             "service_account": {"uid": os.getuid(), "name": pwd.getpwuid(os.getuid()).pw_name},
             "configuration": {"harness": "goose", "provider": "goose-managed" if config.current(doc["config"]) else "obsolete", "model": None,
-                              "profile_configured": True, "prompt_configured": True},
+                              "profile_configured": True, "prompt_configured": True, "prompt_source": "agent_configuration",
+                              "sender_policy": config.sender_summary(doc["config"])},
             "unit": supervisor.name(doc["id"])}
 
 
@@ -151,7 +158,12 @@ def execute(args):
     if os.getuid() == 0:
         raise Error("root_denied", "Run Buzz Server as an unprivileged service user. For a dedicated account, use the documented, explicitly authorized host-admin procedure.")
     if args.operation == "account-plan":
-        return account_plan(args.account)
+        plan = account_plan(args.account)
+        if args.id:
+            from .accounts import account, binding_for
+            binding = binding_for(Path(args.state_dir).absolute(), args.id, account(args.account))
+            plan.update(target_data=binding.data, unit=binding.service)
+        return plan
     if args.operation == "install":
         data = release.install(Path(sys.argv[0]).absolute(), args.prefix, args.state_dir, args.unit_dir,
                                offer_repair=not args.json and dependencies.interactive())
@@ -174,6 +186,11 @@ def execute(args):
         raise Error("interactive_required", "Goose setup requires an interactive terminal on stdin/stdout/stderr and cannot run with --json.")
     if args.operation == "create" and not args.config and (args.json or not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))):
         raise Error("interactive_required", "Guided creation requires a terminal on stdin/stdout/stderr; use --config for JSON or non-interactive creation.")
+    expected_identity = None
+    if args.operation == "create" and args.expect_identity is not None:
+        expected_identity = operator_public_key(args.expect_identity)
+        if not args.account or not args.config or expected_identity is None:
+            raise Error("usage", "Use --expect-identity with a Buzz public key, --account and --config for a dedicated-agent restore.")
     doctor_progress = args.operation == "doctor" and not args.json and dependencies.interactive()
     if doctor_progress:
         check = "dedicated account layout" if args.account else "systemd user manager"
@@ -226,8 +243,10 @@ def execute(args):
                 doc = account_lifecycle.load(bindings, args.id)
                 if doc["phase"] != "creating":
                     raise Error("already_exists", "This ID has managed or retained data. Use configure or choose another ID.")
+                if expected_identity is not None and doc["identity"] != expected_identity:
+                    raise Error("identity_mismatch", "The expected public key does not match the interrupted create. Retry with the original inputs.")
             else:
-                doc = {"version": 1, "id": args.id, "phase": "creating", "identity": None,
+                doc = {"version": 1, "id": args.id, "phase": "creating", "identity": expected_identity,
                        "revision": 1, "desired": "stopped"}
             lifecycle = account_lifecycle.Lifecycle(store, bound, interactive=not args.json)
             lifecycle.save(doc)
@@ -257,7 +276,7 @@ def execute(args):
             if doc["phase"] != "ready" and not (args.operation == "delete" and doc["phase"] in {"deleting", "unit_removed"}):
                 raise Error("account_incomplete", "The dedicated-account lifecycle is incomplete. Retry the original create/delete command.")
             return account_lifecycle.Lifecycle(store, bound, interactive=not args.json).execute(args, doc)
-    if args.operation in {"worker", "prompt"}:
+    if args.operation in {"worker", "prompt", "diagnostics"}:
         raise Error("dedicated_required", "This command requires an existing dedicated-account agent.")
     supervisor = Systemd(store, args.unit_dir)
     guided = None
@@ -315,7 +334,7 @@ def execute(args):
                 raise Error("already_exists", "This ID already has managed or retained data. Choose another ID; delete retains private data and identity.")
             prompt = None
             if guided is None:
-                c = config.load(args.config)
+                c = config.preserve_sender_policy(config.load(args.config), {})
             else:
                 c, prompt = guided
             key, identity = generate()
@@ -350,7 +369,7 @@ def execute(args):
             return start(store, supervisor, doc)
         if args.operation == "configure":
             candidate = copy.deepcopy(doc)
-            candidate["config"] = config.load(args.config)
+            candidate["config"] = config.preserve_sender_policy(config.load(args.config), doc["config"])
             prepare(store, candidate, snapshot=False)
             # Stop is verified before replacing configuration. A failed stop
             # leaves the original definition intact, marked intentionally stopped.
@@ -410,6 +429,7 @@ def guided_create(ident, directory, root, dedicated=None):
     config.validate_relay_transport(relay)
     if not config.text(prompt, 65536, True):
         raise Error("invalid_config", "System prompt contains invalid characters.")
+    print("Sender policy: owner-only (operator and verified same-owner agents).")
     if dedicated:
         print(f"The agent will be created stopped as {dedicated.account} (UID {dedicated.uid}). Authorize fixed system tools through ordinary sudo; the agent receives no management CLI or sudo grant.")
     else:
@@ -466,11 +486,21 @@ def render(operation, data):
         heading = (f"{data['id']}: created and left stopped." if operation == "create" else
                    f"{data['id']}: systemd reports {data['service_state']}; operator requested {data['desired']}.")
         lines = [heading, f"Buzz identity: {data['identity']}", f"Service account: {data['service_account']['name']}"]
+        policy = data["configuration"]["sender_policy"]
+        if policy is None:
+            lines.append(f"Sender policy unconfirmed. Retry buzz-server configure {data['id']} --config PATH.")
+        else:
+            sender = {"owner-only": "operator and verified same-owner agents",
+                      "allowlist": f"operator, verified same-owner agents and {policy['allowlist_count']} listed keys",
+                      "anyone": "any eligible sender in joined channels"}
+            lines.append(f"Sender policy: {policy['mode']} ({sender[policy['mode']]}).")
         if operation == "create":
             lines.append(f"Next, run buzz-server inference configure {data['id']}. Follow docs/quickstart.md for relay admission before first start.")
         elif "startup" in data:
-            from .account_lifecycle import render_startup
+            from .account_lifecycle import render_diagnostics, render_startup
             lines.extend(render_startup(data))
+            if operation in {"status", "show", "diagnostics"}:
+                lines.extend(render_diagnostics(data["diagnostics"]))
             deployment = data["deployment"]
             selected = deployment["selected_worker"]
             if selected is None:
@@ -480,16 +510,26 @@ def render(operation, data):
                 lines.append(f"Selected worker {selected['version']} ({pins}).")
                 if deployment["running_worker"] is not None:
                     lines.append(f"Running worker {selected['version']}.")
-            if deployment["prompt_revision"]:
-                lines.append(f"Approved prompt revision {deployment['prompt_revision']}.")
         else:
             lines.append("Local runtime process observed." if data["runtime_started"] else "Local runtime readiness unverified.")
-            lines.append("Buzz reply untested. See First reply in docs/quickstart.md.")
+        if operation in {"status", "show", "prompt"}:
+            revision = data.get("deployment", {}).get("prompt_revision")
+            if revision:
+                lines.append(f"Buzz Server prompt source: approved snapshot revision {revision}.")
+            else:
+                lines.append("Buzz Server prompt source: agent configuration.")
+            command = f"buzz-server configure {data['id']} --config PATH"
+            if "deployment" in data:
+                lines.append(f"Use {command} to change the configured prompt, or buzz-server prompt --help to manage snapshots.")
+            else:
+                lines.append(f"Use {command} to change the configured prompt.")
+        if operation in {"start", "restart"}:
+            lines.append(f"To verify a reply in Buzz, follow {FIRST_REPLY_URL}")
         return "\n".join(lines)
     if operation == "inference":
-        return (f"{data['id']}: Goose exited successfully. A clean exit can also mean setup was cancelled.\n"
+        return (f"{data['id']}: Goose setup closed. Confirm you completed the provider setup in Goose before starting.\n"
                 "Provider access and Buzz replies remain unverified.\n"
-                f"If you completed setup, follow docs/quickstart.md to admit the key if required, start the agent and test a reply.\n"
+                f"If you completed setup, admit the key if required, start the agent and follow {FIRST_REPLY_URL}\n"
                 f"If you cancelled, rerun buzz-server inference configure {data['id']}.")
     if operation == "delete":
         return f"{data['id']}: stopped and removed from management. Private data, Linux account and Buzz history retained."
