@@ -352,9 +352,8 @@ class DependencyTests(unittest.TestCase):
             'provider': {'kind': 'goose-managed'}}}
         with (patch.object(d.shutil, 'which', return_value=None), patch.object(runtime, 'help_check'),
               patch.object(runtime, 'public', return_value=doc['identity'])):
-            command, profile, env, _ = runtime.prepare(self.store, doc, snapshot=False)
+            command, env, _ = runtime.prepare(self.store, doc, snapshot=False)
         self.assertEqual(command[0], str(directory / 'buzz-acp'))
-        self.assertEqual(profile[0], str(directory / 'buzz'))
         self.assertEqual(command[command.index('--agent-command') + 1], str(directory / 'goose'))
         self.assertEqual(env['PATH'], d.SYSTEM_PATH + ':' + str(directory))
 

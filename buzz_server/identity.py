@@ -1,3 +1,4 @@
+from hashlib import sha256
 import re
 import secrets
 import subprocess
@@ -39,18 +40,50 @@ def operator_public_key(value):
     return (payload >> 4).to_bytes(32, "big").hex()
 
 
-def public(key):
+def compressed_public(scalar):
     try:
-        n = int(key, 16)
-        if len(key) != 64 or not 0 < n < ORDER:
+        if not 0 < scalar < ORDER:
             raise ValueError()
         p = subprocess.run(["/usr/bin/openssl", "ec", "-inform", "DER", "-pubout", "-conv_form", "compressed", "-outform", "DER"],
-                           input=PREFIX + bytes.fromhex(key) + SUFFIX, capture_output=True, timeout=5)
+                           input=PREFIX + scalar.to_bytes(32, "big") + SUFFIX, capture_output=True,
+                           timeout=5, env={"PATH": "/usr/bin:/bin"})
         if p.returncode or len(p.stdout) != 56 or p.stdout[-33] not in (2, 3):
             raise ValueError()
-        return p.stdout[-32:].hex()
+        return p.stdout[-33:]
     except (OSError, ValueError, subprocess.TimeoutExpired):
         raise Error("identity_unavailable", "Cannot verify the agent identity. Install OpenSSL with secp256k1 support or restore a valid identity file.")
+
+
+def public(key):
+    try:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", key):
+            raise ValueError()
+        return compressed_public(int(key, 16))[1:].hex()
+    except ValueError:
+        raise Error("identity_unavailable", "Cannot verify the agent identity. Install OpenSSL with secp256k1 support or restore a valid identity file.") from None
+
+
+def tagged_hash(tag, data):
+    prefix = sha256(tag).digest()
+    return sha256(prefix + prefix + data).digest()
+
+
+def schnorr_sign(key, message):
+    """BIP-340 signing. OpenSSL supplies the secp256k1 point multiplication."""
+    secret = int(key, 16)
+    point = compressed_public(secret)
+    public_x = point[1:]
+    if point[0] == 3:
+        secret = ORDER - secret
+    mask = tagged_hash(b"BIP0340/aux", secrets.token_bytes(32))
+    masked_secret = bytes(a ^ b for a, b in zip(secret.to_bytes(32, "big"), mask, strict=True))
+    nonce = int.from_bytes(tagged_hash(b"BIP0340/nonce", masked_secret + public_x + message), "big") % ORDER
+    nonce_point = compressed_public(nonce)
+    nonce_x = nonce_point[1:]
+    if nonce_point[0] == 3:
+        nonce = ORDER - nonce
+    challenge = int.from_bytes(tagged_hash(b"BIP0340/challenge", nonce_x + public_x + message), "big") % ORDER
+    return nonce_x + ((nonce + challenge * secret) % ORDER).to_bytes(32, "big")
 
 
 def generate():

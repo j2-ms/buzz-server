@@ -104,9 +104,9 @@ class Handler(BaseHTTPRequestHandler):
                     (root / "transient").unlink()
                     self.reply({"accepted": False, "message": "synthetic transient rejection", "event_id": body["id"]})
                     return
-                temporary = profile.with_suffix(".next")
-                temporary.write_text(json.dumps(body))
-                temporary.replace(profile)
+            temporary = profile.with_suffix(".next")
+            temporary.write_text(json.dumps(body))
+            temporary.replace(profile)
             self.server.count("profile_posts")
             self.reply({"accepted": True, "message": "", "id": body["id"]})
         else:

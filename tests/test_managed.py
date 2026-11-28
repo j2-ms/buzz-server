@@ -106,7 +106,7 @@ class ManagedTests(unittest.TestCase):
         self.assertEqual(doc["desired"], "stopped")
         store = Store(self.root)
         with patch.dict(os.environ, {"GOOSE_MODEL": "evil", "GOOSE_PROVIDER": "evil", "OPENAI_API_KEY": "SYNTHETIC-PRIVATE-KEY", "LD_PRELOAD": "evil", "BUZZ_AUTHOR": "evil"}):
-            command, _, env, work = runtime.prepare(store, doc)
+            command, env, work = runtime.prepare(store, doc)
         self.assertNotIn("--model", command)
         self.assertNotIn("GOOSE_MODEL", env)
         self.assertNotIn("GOOSE_PROVIDER", env)

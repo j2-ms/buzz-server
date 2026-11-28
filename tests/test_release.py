@@ -560,7 +560,7 @@ class LaunchTests(unittest.TestCase):
                   patch('buzz_server.runtime.public', return_value=doc['identity']),
                   patch('buzz_server.runtime.tool', return_value='/usr/bin/true'),
                   patch('buzz_server.runtime.help_check')):
-                command, _, env, _ = prepare(store, doc)
+                command, env, _ = prepare(store, doc)
             for key in ambient.keys() - {'GOOSE_DISABLE_KEYRING', 'BUZZ_PRIVATE_KEY'}:
                 self.assertNotIn(key, env)
             self.assertEqual(env['GOOSE_DISABLE_KEYRING'], '1')

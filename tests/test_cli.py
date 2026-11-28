@@ -509,32 +509,31 @@ class RuntimeTests(unittest.TestCase):
     def test_dedicated_worker_distinguishes_explicit_profile_refusal_from_retry(self):
         store = Store(self.base / "state")
         private_dir(store.directory("agent"))
-        doc = {"desired": "running", "config": {"provider": {"kind": "goose-managed"}}}
-        env = {key: "fixture" for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
-        refusal = b'{"accepted":false,"message":"restricted: fixture membership required"}'
-        cases = ((0, refusal, 79), (0, b'{"accepted":false,"message":"temporary"}', 75), (1, refusal, 75))
-        for child_code, output, expected in cases:
-            profile = Mock(returncode=child_code)
-            profile.communicate.return_value = (output, None)
-            with (self.subTest(child_code=child_code, output=output),
+        doc = {"desired": "running", "identity": "fixture", "config": {"provider": {"kind": "goose-managed"},
+                                                                       "relay_url": "fixture", "profile": {}}}
+        env = {"BUZZ_PRIVATE_KEY": "fixture"}
+        refusal = {"accepted": False, "message": "restricted: fixture membership required"}
+        cases = ((refusal, None, 79), ({"accepted": False, "message": "temporary"}, None, 75), (None, TimeoutError, 75))
+        for result, failure, expected in cases:
+            with (self.subTest(result=result, failure=failure),
                   patch.object(store, "load", return_value=doc),
                   patch("buzz_server.runtime.signal.signal"),
                   patch("buzz_server.runtime.notify_startup") as notify,
-                  patch("buzz_server.runtime.prepare", return_value=(["runtime"], ["profile"], env, self.base)),
-                  patch("buzz_server.runtime.subprocess.Popen", return_value=profile) as launch):
+                  patch("buzz_server.runtime.prepare", return_value=(["runtime"], env, self.base)),
+                  patch("buzz_server.runtime.publish_profile", return_value=result, side_effect=failure) as publish,
+                  patch("buzz_server.runtime.subprocess.Popen") as launch):
                 self.assertEqual(worker(store, "agent", dedicated=True), expected)
-                launch.assert_called_once()
-                self.assertEqual(launch.call_args.args[0], ["profile"])
+                publish.assert_called_once()
+                launch.assert_not_called()
                 self.assertFalse(any(call.kwargs.get("ready") for call in notify.call_args_list))
 
     def test_dedicated_worker_runtime_exit_after_ready_distinguishes_stop(self):
         store = Store(self.base / "state")
         directory = private_dir(store.directory("agent"))
-        doc = {"desired": "running", "revision": 1, "config": {"provider": {"kind": "goose-managed"}}}
+        doc = {"desired": "running", "revision": 1, "identity": "fixture",
+               "config": {"provider": {"kind": "goose-managed"}, "relay_url": "fixture", "profile": {}}}
         env = {key: "fixture" for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
         for stopping, expected in ((False, 76), (True, 0)):
-            profile = Mock(returncode=0)
-            profile.communicate.return_value = (b'{"accepted":true}', None)
             runtime = Mock(pid=123)
             runtime.poll.return_value = None
             signals = {}
@@ -551,8 +550,9 @@ class RuntimeTests(unittest.TestCase):
                   patch.object(store, "load", return_value=doc),
                   patch("buzz_server.runtime.signal.signal", side_effect=signals.__setitem__),
                   patch("buzz_server.runtime.notify_startup") as notify,
-                  patch("buzz_server.runtime.prepare", return_value=(["runtime"], ["profile"], env, self.base)),
-                  patch("buzz_server.runtime.subprocess.Popen", side_effect=[profile, runtime]),
+                  patch("buzz_server.runtime.prepare", return_value=(["runtime"], env, self.base)),
+                  patch("buzz_server.runtime.publish_profile", return_value={"accepted": True}),
+                  patch("buzz_server.runtime.subprocess.Popen", return_value=runtime),
                   patch("buzz_server.runtime.time.sleep")):
                 self.assertEqual(worker(store, "agent", dedicated=True), expected)
             notify.assert_called_with("ready", ready=True)
@@ -565,27 +565,26 @@ class RuntimeTests(unittest.TestCase):
         private_dir(store.directory("agent"))
         shared_env = {key: "fixture" for key in ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "BUZZ_PRIVATE_KEY")}
         env = dict(shared_env, OPENAI_API_KEY="synthetic-provider-key", ANTHROPIC_API_KEY="synthetic-second-key", GOOSE_PROVIDER="openai", GOOSE_MODEL="synthetic-model")
-        profiled = Mock(returncode=0)
-        profiled.communicate.return_value = (b'{"accepted":true}', None)
         runtime = Mock()
         runtime.poll.return_value = None
         signals = {}
 
-        def launch(command, **_):
-            if command == ["profile"]:
-                return profiled
+        def launch(*_, **__):
             signals[signal.SIGTERM](signal.SIGTERM, None)
             return runtime
 
-        doc = {"desired": "running", "revision": 1, "config": {"provider": {"kind": "goose-managed"}}}
+        doc = {"desired": "running", "revision": 1, "identity": "fixture",
+               "config": {"provider": {"kind": "goose-managed"}, "relay_url": "fixture", "profile": {}}}
         with patch.object(store, "load", return_value=doc), patch(
-            "buzz_server.runtime.prepare", return_value=(["runtime"], ["profile"], env, self.base)
+            "buzz_server.runtime.prepare", return_value=(["runtime"], env, self.base)
         ), patch("buzz_server.runtime.signal.signal", side_effect=signals.__setitem__), patch(
+            "buzz_server.runtime.publish_profile", return_value={"accepted": True}
+        ) as publish, patch(
             "buzz_server.runtime.subprocess.Popen", side_effect=launch
         ) as popen:
             self.assertEqual(worker(store, "agent"), 0)
-        self.assertEqual(popen.call_args_list[0].kwargs["env"], shared_env)
-        self.assertEqual(popen.call_args_list[1].kwargs["env"], env)
+        publish.assert_called_once_with("fixture", {}, "fixture", "fixture")
+        self.assertEqual(popen.call_args.kwargs["env"], env)
         runtime.terminate.assert_called_once()
         self.assertFalse((store.directory("agent") / "ready.json").exists())
 
@@ -612,8 +611,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("User=root", unit)
 
     def test_profile_acceptance_requires_explicit_true(self):
-        self.assertTrue(profile_accepted(b'{"accepted":true}'))
-        for output in (b'{"accepted":false}', b'{"accepted":"true"}', b'{}', b'[]', b'not JSON'):
+        self.assertTrue(profile_accepted({"accepted": True}))
+        for output in ({"accepted": False}, {"accepted": "true"}, {}, [], None):
             self.assertFalse(profile_accepted(output))
 
 

@@ -23,7 +23,7 @@ from .storage import private_dir
 
 SYSTEM_PATH = '/usr/local/bin:/usr/bin:/bin'
 NAMES = ('buzz', 'buzz-acp', 'goose')
-ROLES = {'buzz': 'headless profile updates', 'buzz-acp': 'Buzz to ACP adapter', 'goose': 'inference harness; configure separately'}
+ROLES = {'buzz': 'relay operations and profile inspection', 'buzz-acp': 'Buzz to ACP adapter', 'goose': 'inference harness; configure separately'}
 ACP_FLAGS = ('--system-prompt-file', '--agent-command', '--agent-args', '--model', '--permission-mode', '--respond-to', '--session-title', '--config')
 PACKAGES = (
     dict(name='buzz', version='desktop-v0.5.30',

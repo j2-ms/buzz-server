@@ -58,6 +58,7 @@ def exercise(root, account, tools):
             cli("doctor", "--account", account)
             identity = cli("create", ident, "--account", account, "--config", str(config))["identity"]
             created = True
+            assert not (fixture / "counts.json").exists()
             assert cli("start", ident, ok=False)["code"] == "profile_refused"
             assert status()["startup"]["retry"] == "ended"
             assert not (fixture / "profile.json").exists()
@@ -68,7 +69,9 @@ def exercise(root, account, tools):
             started = cli("start", ident)
             assert started["identity"] == identity and started["runtime_started"]
             assert started["startup"]["profile"] == "confirmed" and not started["buzz_response_verified"]
-            assert json.loads((fixture / "profile.json").read_text())["pubkey"] == identity
+            profile = json.loads((fixture / "profile.json").read_text())
+            assert profile["pubkey"] == identity and profile["tags"] == []
+            assert json.loads(profile["content"])["is_agent"] is True
             print("PASS explicit restart published the same key and reached local readiness", flush=True)
 
             cli("stop", ident)
